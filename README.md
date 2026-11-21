@@ -4,7 +4,7 @@
 
 # CineVault
 
-[English](README.En.md) · **Français**
+[English](README.en.md) · **Français**
 
 > CineVault FR est un fork indépendant de [CineVault](https://github.com/mustafayevt/CineVault) par mustafayevt (Apache-2.0), avec une interface en français et une étape « dossier » lors du Scrape.
 
