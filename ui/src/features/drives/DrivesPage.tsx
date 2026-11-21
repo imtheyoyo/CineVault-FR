@@ -1,0 +1,179 @@
+import { useNavigate, useSearch } from "@tanstack/react-router";
+import { MoreHorizontal, RefreshCw, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+
+import { Button } from "../../components/Button";
+import { IconButton } from "../../components/IconButton";
+import { Menu } from "../../components/Menu";
+import { MenuItem } from "../../components/MenuItem";
+import { Skeleton } from "../../components/Skeleton";
+import { t } from "../../i18n/catalog";
+import { useFormat } from "../../i18n/useFormat";
+import { showToast } from "../toasts/toastStore";
+import { DriveCard } from "./DriveCard";
+import { useDrivesOverview } from "./drivesBackend";
+import { chosenDrive } from "./drivesSearch";
+import type { DrivesSearch } from "./drivesSearch";
+import { agoText, offlineCount, trashTotal } from "./drivesModel";
+import type { Drive } from "./drivesModel";
+import { DriveTitles } from "./DriveTitles";
+import { EmptyTrashDialog } from "./EmptyTrashDialog";
+import { useNow } from "./useNow";
+
+/** "4 drives · 1 offline". */
+function headerText(drives: readonly Drive[]): string {
+  const offline = offlineCount(drives);
+  return offline === 0
+    ? t("drivesPage.header", { count: drives.length })
+    : t("drivesPage.header.offline", { count: drives.length, offline });
+}
+
+function Empty() {
+  const navigate = useNavigate();
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+      <h2 className="m-0 text-(length:--fs-16) font-(weight:--fw-700)">
+        {t("drivesPage.empty.title")}
+      </h2>
+      <p className="m-0 max-w-[48ch] text-text-2">{t("drivesPage.empty.body")}</p>
+      <Button onClick={() => void navigate({ to: "/settings", search: { section: "library" } })}>
+        {t("drivesPage.empty.action")}
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * The Drives page (`/drives?drive=<id>`): a card per drive that holds a library folder on the
+ * left, and the titles of the chosen drive on the right. The chosen drive is in the address, so the
+ * sidebar can choose it and Back returns to the one before. The numbers are read when the page
+ * opens, when the service says they changed, every minute while the app is in front, and on Refresh.
+ */
+export function DrivesPage() {
+  const format = useFormat();
+  const overview = useDrivesOverview();
+  const now = useNow();
+  const navigate = useNavigate();
+  const { drive: chosen } = useSearch({ strict: false }) as DrivesSearch;
+  const [refreshing, setRefreshing] = useState(false);
+  /** The drive whose Empty… is open (`"*"` for every drive), or `null`. */
+  const [emptying, setEmptying] = useState<string | null>(null);
+
+  const drives = overview.data?.drives ?? [];
+  const drive = chosenDrive(drives, chosen);
+  // The chosen card comes into view: on a narrow pane the cards are a row to swipe through, and a
+  // drive chosen from the sidebar may be off to the side.
+  const cards = useRef<HTMLDivElement>(null);
+  const chosenId = drive?.id;
+  useEffect(() => {
+    if (chosenId === undefined) return;
+    const card = cards.current?.querySelector(`[data-drive="${CSS.escape(chosenId)}"]`);
+    card?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [chosenId]);
+  const updatedMs = overview.data?.updatedMs ?? 0;
+  const updated =
+    updatedMs === 0
+      ? ""
+      : (() => {
+          const when = agoText(updatedMs, now, format.locale);
+          return when === "" ? t("drivesPage.updated.now") : t("drivesPage.updated", { when });
+        })();
+
+  // Reads every drive again now; a failure keeps the numbers that are shown. Not disabled while it
+  // reads, so keyboard focus stays on the button; a second press waits for the first read.
+  const refresh = () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    void overview.refetch().then((result) => {
+      setRefreshing(false);
+      if (result.isError) showToast({ message: t("drivesPage.refresh.failed") });
+    });
+  };
+
+  return (
+    <section
+      aria-label={t("drivesPage.region")}
+      className="relative flex h-full min-h-0 @max-[860px]/pane:flex-col"
+    >
+      <h1 className="sr-only">{t("drivesPage.region")}</h1>
+      {overview.isPending ? (
+        <div
+          aria-busy="true"
+          className="flex w-[380px] shrink-0 flex-col gap-2.5 border-r border-solid border-line-section px-6 py-4"
+        >
+          {[0, 1, 2].map((n) => (
+            <Skeleton key={n} shape="tile" aspect="380 / 150" />
+          ))}
+        </div>
+      ) : overview.isError && drives.length === 0 ? (
+        <div role="alert" className="flex flex-1 flex-col items-start gap-2 px-6 pt-4">
+          <p className="m-0 text-danger">{t("drivesPage.error")}</p>
+          <Button onClick={() => void overview.refetch()}>{t("drivesPage.retry")}</Button>
+        </div>
+      ) : drives.length === 0 ? (
+        <Empty />
+      ) : (
+        <>
+          <div
+            ref={cards}
+            role="group"
+            aria-label={t("drivesPage.cards")}
+            className="flex w-[380px] shrink-0 flex-col gap-2.5 overflow-y-auto border-r border-solid border-line-section px-6 py-4 @max-[860px]/pane:w-full @max-[860px]/pane:overflow-visible @max-[860px]/pane:border-r-0 @max-[860px]/pane:border-b @max-[860px]/pane:pb-3 @max-[640px]/pane:px-4"
+          >
+            <div className="flex items-center gap-2">
+              <span className="type-section-label grow">{headerText(drives)}</span>
+              <span className="text-(length:--fs-12) text-text-muted">{updated}</span>
+              <IconButton
+                size="sm"
+                icon={RefreshCw}
+                aria-label={refreshing ? t("drivesPage.refreshing") : t("drivesPage.refresh")}
+                aria-busy={refreshing ? "true" : undefined}
+                className={refreshing ? "[&_svg]:animate-spin" : undefined}
+                onClick={refresh}
+              />
+              <Menu
+                align="end"
+                aria-label={t("drivesPage.menu")}
+                trigger={
+                  <IconButton size="sm" icon={MoreHorizontal} aria-label={t("drivesPage.menu")} />
+                }
+              >
+                <MenuItem
+                  icon={Trash2}
+                  danger
+                  {...(drives.some((entry) => entry.online && trashTotal(entry) > 0)
+                    ? {}
+                    : { disabledReason: t("drivesPage.trash.noneAnywhere") })}
+                  onSelect={() => setEmptying("*")}
+                >
+                  {t("drivesPage.trash.emptyAll")}
+                </MenuItem>
+              </Menu>
+            </div>
+            {/* The cards stack in the column; narrow panes lay them in a row to swipe through. */}
+            <div className="contents @max-[860px]/pane:-mx-6 @max-[860px]/pane:flex @max-[860px]/pane:items-start @max-[860px]/pane:gap-2.5 @max-[860px]/pane:overflow-x-auto @max-[860px]/pane:px-6 @max-[860px]/pane:pb-1 @max-[860px]/pane:[scrollbar-width:thin] @max-[640px]/pane:-mx-4 @max-[640px]/pane:px-4">
+              {drives.map((entry) => (
+                <DriveCard
+                  key={entry.id}
+                  drive={entry}
+                  selected={entry.id === drive?.id}
+                  now={now}
+                  onSelect={() => void navigate({ to: "/drives", search: { drive: entry.id } })}
+                  onEmpty={() => setEmptying(entry.id)}
+                />
+              ))}
+            </div>
+          </div>
+          {drive === undefined ? null : <DriveTitles key={drive.id} drive={drive} />}
+        </>
+      )}
+      {emptying === null ? null : (
+        <EmptyTrashDialog
+          driveId={emptying === "*" ? null : emptying}
+          name={drives.find((entry) => entry.id === emptying)?.name ?? ""}
+          onClose={() => setEmptying(null)}
+        />
+      )}
+    </section>
+  );
+}

@@ -1,0 +1,61 @@
+name: Deploy site
+
+# Publishes site/ (the landing page, https://imtheyoyo.github.io/CineVault-FR/) and the server install
+# scripts (scripts/install/) to GitHub Pages when a push to main changes them or CHANGELOG.md (the
+# changelog page is generated from it), and by hand: Actions → Deploy site → Run workflow. Pages
+# must use the "GitHub Actions" source (Settings → Pages → Build and deployment).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "CHANGELOG.md"
+      - "scripts/install/**"
+      - ".github/workflows/site.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      # site/changelog.html must be what CHANGELOG.md gives (bun run site:changelog regenerates it).
+      - name: Site changelog is current
+        run: bun run site:changelog -- --check
+
+      # The website is the contents of site/ without its README, plus the server install scripts
+      # (https://imtheyoyo.github.io/CineVault-FR/install.sh and install.ps1).
+      - name: Stage the site
+        run: |
+          mkdir -p _site
+          cp -R site/. _site/
+          rm -f _site/README.md
+          cp scripts/install/install.sh scripts/install/install.ps1 _site/
+          touch _site/.nojekyll
+          ls -l _site
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

@@ -1,0 +1,5 @@
+dist/
+node_modules/
+src/bindings.ts
+bun.lock
+src/features/settings/artworkNameCatalog.ts

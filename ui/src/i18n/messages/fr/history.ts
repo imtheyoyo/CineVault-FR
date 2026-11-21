@@ -1,0 +1,43 @@
+/** Textes français de la section Historique. Fusionnés avec les autres sections dans `../../catalog.ts`. */
+export const history = {
+  // La page Historique
+  "history.tabs": "Afficher",
+  "history.tab.all": "Tout",
+  "history.tab.renames": "Renommages",
+  "history.tab.moves": "Déplacements",
+  "history.tab.deletes": "Suppressions",
+  "history.tab.artwork": "Illustrations et correspondances",
+  "history.bin": "{size} dans la {bin}",
+  "history.bin.tip": "Ce que CineVault a envoyé à la {bin} et qui s’y trouve encore",
+  "history.day.today": "Aujourd’hui",
+  "history.day.yesterday": "Hier",
+  "history.undo": "Annuler",
+  "history.undoAll": "Tout annuler",
+  "history.undoRest": "Annuler le reste",
+  "history.restore": "Restaurer",
+  "history.undone": "Annulé",
+  "history.noUndo": "Non annulable",
+  "history.partial": "{done} annulés sur {total}",
+  "history.undoneAt": "Annulé à {time}",
+  "history.showMore": "Afficher {count} de plus",
+  "history.showLess": "Afficher moins",
+  "history.expand": "Afficher les titres de {summary}",
+  "history.collapse": "Masquer les titres de {summary}",
+  "history.older": "Afficher les entrées plus anciennes",
+  "history.loading": "Lecture de l’Historique",
+  "history.error": "L’Historique n’a pas pu être lu.",
+  "history.retry": "Réessayer",
+  "history.empty.title": "Rien pour l’instant",
+  "history.empty.body":
+    "Les renommages, déplacements, suppressions, changements d’illustrations et nouvelles correspondances sont listés ici, et chacun peut être annulé.",
+  "history.empty.tab": "Rien de ce type pour l’instant.",
+
+  // Annulation depuis une notification, une page ou l’Historique
+  "history.toast.undone": "Annulation : {summary}",
+  "history.toast.restored": "Restauré : {summary}",
+  "history.toast.partial": "{done} annulés sur {total}. {left}",
+  "history.toast.nothing": "Rien n’a été annulé. {left}",
+  "history.toast.left": "{title} : {reason}",
+  "history.toast.more": "et {count} de plus",
+  "history.toast.failed": "Impossible d’annuler {summary}",
+} as const;

@@ -1,0 +1,175 @@
+name: CI
+
+# Every pull request to main and every push to main (and by hand: Actions → CI → Run workflow, or
+# gh workflow run ci.yml --ref <branch>). Runs the Rust and UI checks on Windows and Linux. Pushes
+# to main also build the installers and keep them as workflow artifacts for 7 days, so every commit
+# on main has a test build.
+#
+# macOS is left out until the macOS work in 1.2.0: the last run failed on its own (the UI format
+# check, since fixed), and no macOS build has been brought up on the new CI yet.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    # The name is what branch protection requires: keep it in step with the rules on main.
+    name: Build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-components: rustfmt, clippy
+
+      # The Tauri app embeds ui/dist at compile time, so the UI is built before the Rust checks.
+      - name: UI install
+        working-directory: ui
+        run: bun install --frozen-lockfile
+
+      # UI lint, typecheck, format and tests do not depend on the system: they run once, on Linux.
+      - name: UI lint
+        if: runner.os == 'Linux'
+        working-directory: ui
+        run: bun run lint
+
+      - name: UI typecheck
+        if: runner.os == 'Linux'
+        working-directory: ui
+        run: bun run typecheck
+
+      - name: UI format
+        if: runner.os == 'Linux'
+        working-directory: ui
+        run: bun run format:check
+
+      - name: UI test
+        if: runner.os == 'Linux'
+        working-directory: ui
+        run: bun run test
+
+      - name: UI build
+        working-directory: ui
+        run: bun run build
+
+      - name: Rust format
+        run: cargo fmt --all --check
+
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust test
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Compatibility fixtures
+        run: cargo test -p cv-compat
+
+      - name: Bundling configuration
+        run: node scripts/check-bundle.mjs
+
+      - name: Documented commands exist
+        run: bun run check:scripts
+
+      - name: Version files agree
+        run: |
+          node scripts/check-version.mjs --self-test
+          node scripts/check-version.mjs
+
+      - name: Release script self-test
+        run: node scripts/release-publish.mjs --self-test
+
+      - name: Changelog self-test
+        run: node scripts/changelog.mjs --self-test
+
+      - name: Server installer self-test
+        if: runner.os == 'Linux'
+        run: sh scripts/install/install.sh --self-test
+
+      - name: Windows installer self-test
+        if: runner.os == 'Windows'
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install/install.ps1 -SelfTest
+          pwsh -NoProfile -File scripts/install/install.ps1 -SelfTest
+
+      - name: Site changelog is current
+        run: bun run site:changelog -- --check
+
+      # The specs have a few long requirements, which strict mode reports as warnings; errors still
+      # fail the check. Strict mode can come back once those requirements are split.
+      - name: OpenSpec specs
+        if: runner.os == 'Linux'
+        run: npx --yes @fission-ai/openspec@1.14.3 validate --specs
+
+  # Test builds of the installers for every commit on main (not for pull requests).
+  installers:
+    name: Installers (${{ matrix.os }})
+    if: github.event_name == 'push'
+    needs: check
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: windows
+            paths: |
+              target/release/bundle/nsis/*.exe
+              target/release/bundle/msi/*.msi
+          - os: ubuntu-22.04
+            artifact: linux
+            paths: |
+              target/release/bundle/appimage/*.AppImage
+              target/release/bundle/deb/*.deb
+              target/release/bundle/rpm/*.rpm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: ./.github/actions/setup-build
+        with:
+          cache-key: installers
+
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          cd ui && bun install --frozen-lockfile
+
+      # `tauri build` runs the UI build first (beforeBuildCommand) and bundles per system.
+      - name: Build installers
+        run: bun run tauri build
+
+      - name: Check the installers exist
+        run: node scripts/check-bundle.mjs --artifacts
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: cinevault-${{ matrix.artifact }}-${{ github.sha }}
+          path: ${{ matrix.paths }}
+          if-no-files-found: error
+          retention-days: 7

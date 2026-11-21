@@ -1,0 +1,322 @@
+name: Release
+
+# Cut a release by pushing a tag from main:
+#
+#   (bump the version in a pull request and merge it, then)
+#   git switch main && git pull && git tag vX.Y.Z && git push origin vX.Y.Z
+#
+# The Windows (NSIS, MSI, portable zip) and Linux (AppImage, deb, rpm) installers are built in
+# parallel, the server image is pushed to GHCR and its .deb, .rpm and tarball are built, the tag is
+# checked against the version files (including the Dockerfile's image version), and then the release
+# of this repository is published with the installers, server packages, checksums, the notes from
+# CHANGELOG.md and the signed update manifest.
+#
+# The signing key is the repository secret CINEVAULT_UPDATE_KEY (the contents of the private key
+# file; add it in Settings → Secrets and variables → Actions). Without it the release still gets its
+# installers and notes, but as a pre-release with no manifest, so installed apps do not see it yet:
+# the maintainer then signs it with `node scripts/release-publish.mjs --version X.Y.Z` on the machine
+# that holds the key. Publishing from local builds with --from-dir keeps working as the fallback.
+#
+# By hand: Actions → Release → Run workflow on the branch or tag to release, with its version. The
+# tag vX.Y.Z is created at that commit when it does not exist yet.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, for example 1.2.0 (must match src-tauri/tauri.conf.json at the chosen ref)
+        type: string
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  verify:
+    name: Check the version
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Tag and version files agree
+        id: version
+        env:
+          REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+        run: |
+          requested="${REQUESTED#v}"
+          node scripts/check-version.mjs "$requested"
+          echo "version=$requested" >> "$GITHUB_OUTPUT"
+          echo "tag=v$requested" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Installers (${{ matrix.os }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        # Linux is built on 22.04 so the AppImage runs on older distributions (glibc 2.35 baseline).
+        os: [windows-latest, ubuntu-22.04]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: ./.github/actions/setup-build
+        with:
+          cache-key: installers
+
+      - name: Check the bundling configuration
+        run: node scripts/check-bundle.mjs
+
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          cd ui && bun install --frozen-lockfile
+
+      # `tauri build` runs the UI build first (beforeBuildCommand) and bundles per system:
+      # MSI and NSIS on Windows (tauri.windows.conf.json), AppImage, .deb and .rpm on Linux
+      # (tauri.linux.conf.json).
+      - name: Build installers
+        run: bun run tauri build
+
+      - name: Check the installers exist
+        run: node scripts/check-bundle.mjs --artifacts
+
+      - name: Build the portable zip (Windows)
+        if: runner.os == 'Windows'
+        run: node scripts/package-portable.mjs
+
+      - name: Collect installers
+        run: |
+          mkdir -p out
+          bundle=target/release/bundle
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "$bundle"/msi/*.msi "$bundle"/nsis/*.exe "$bundle"/portable/*.zip out/
+          else
+            cp "$bundle"/appimage/*.AppImage "$bundle"/deb/*.deb "$bundle"/rpm/*.rpm out/
+          fi
+          ls -l out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: installers-${{ runner.os }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 3
+
+  server:
+    name: Server image, packages and tarball
+    needs: verify
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      IMAGE: ghcr.io/${{ github.repository_owner }}/cinevault-fr
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: ./.github/actions/setup-build
+        with:
+          cache-key: server-release
+
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          cd ui && bun install --frozen-lockfile
+
+      - name: Install package tools
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # arm64 joins the image once the linux-aarch64 tool manifest entry and a native runner land
+      # (task 7.6). The amd64 image and every package are built from this tag. Only the version tag
+      # is pushed here; `latest` moves in the last job, once the release is published.
+      - name: Build and push the server image
+        id: image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            CINEVAULT_VERSION=${{ env.VERSION }}
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+
+      - name: Build the server packages and tarball
+        run: |
+          set -euo pipefail
+          bun run server:package
+          bun run server:tarball
+          node scripts/check-version.mjs "$VERSION" \
+            --server-artifacts target/server-package \
+            --server-artifacts target/server-tarball
+          mkdir -p out
+          cp target/server-package/*.deb target/server-package/*.rpm target/server-tarball/*.tar.gz out/
+          test -f "out/cinevault-server_${VERSION}_amd64.deb"
+          test -n "$(find out -maxdepth 1 -name 'cinevault-server-*.rpm' -print -quit)"
+          test -f "out/cinevault-server-${VERSION}-linux-amd64.tar.gz"
+          ls -l out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: server-packages-${{ github.sha }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish the release
+    needs: [verify, build, server]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    # The build and the tag check are done; only this job can write to the repository.
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      TAG: ${{ needs.verify.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+
+      # The release is created on a tag. A tag push already has it; for a manual run it is created
+      # at the checked-out commit. A tag that points elsewhere stops the run.
+      - name: Tag the commit
+        run: |
+          remote=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | tail -n 1 | cut -f1)
+          if [ -z "$remote" ]; then
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          elif [ "$remote" != "$GITHUB_SHA" ]; then
+            echo "::error::$TAG already points at $remote, not at $GITHUB_SHA. Delete the tag or run from the tag."
+            exit 1
+          fi
+
+      # Each artifact is downloaded by name into its own folder. (Downloaded by pattern, a single
+      # match is unpacked straight into `path` with no subfolder, which is how the server packages
+      # of 1.2.0 were skipped: the publish step only reads the subfolders.)
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: installers-Windows
+          path: dist/windows
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: installers-Linux
+          path: dist/linux
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: server-packages-${{ github.sha }}
+          path: dist/server
+
+      # Every asset the release must carry is here, or the release is not published.
+      - name: Check the release assets
+        run: |
+          set -euo pipefail
+          ls -l dist/*/
+          missing=0
+          need() {
+            if [ -z "$(find dist -type f -name "$1" -print -quit)" ]; then
+              echo "::error::No $1 in the downloaded artifacts"
+              missing=1
+            fi
+          }
+          need "CineVault_${VERSION}_x64_en-US.msi"
+          need "CineVault_${VERSION}_x64-setup.exe"
+          need "CineVault_${VERSION}_x64-portable.zip"
+          need "CineVault_${VERSION}_amd64.AppImage"
+          need "CineVault_${VERSION}_amd64.deb"
+          need "CineVault-${VERSION}-*.rpm"
+          need "cinevault-server_${VERSION}_amd64.deb"
+          need "cinevault-server-${VERSION}-*.rpm"
+          need "cinevault-server-${VERSION}-linux-amd64.tar.gz"
+          exit "$missing"
+
+      - name: Publish
+        env:
+          UPDATE_KEY: ${{ secrets.CINEVAULT_UPDATE_KEY }}
+        run: |
+          set -euo pipefail
+          # One --from-dir per build folder (the script reads each folder as it is).
+          args=()
+          for dir in dist/windows dist/linux dist/server; do args+=(--from-dir "$dir"); done
+          if [ -n "$UPDATE_KEY" ]; then
+            # The key goes to a private temporary file outside the repository, is passed by path and
+            # removed again. It is never printed.
+            umask 077
+            key="$RUNNER_TEMP/cinevault-update-key.pem"
+            trap 'rm -f "$key"' EXIT
+            printf '%s\n' "$UPDATE_KEY" > "$key"
+            node scripts/release-publish.mjs --version "$VERSION" "${args[@]}" --repo imtheyoyo/CineVault-FR --key "$key"
+          else
+            msg="CINEVAULT_UPDATE_KEY is not set: $TAG is published as a pre-release with its installers and notes but no signed update manifest, so installed apps do not see it yet. Sign it on the machine that holds the key: node scripts/release-publish.mjs --version $VERSION"
+            echo "::notice title=Release is not signed::$msg"
+            echo "### Release $TAG is not signed" >> "$GITHUB_STEP_SUMMARY"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+            node scripts/release-publish.mjs --unsigned --version "$VERSION" "${args[@]}" --repo imtheyoyo/CineVault-FR
+          fi
+
+      - name: Remove the key file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/cinevault-update-key.pem"
+
+  # `latest` follows a release only after it is published, so a failed installer build or publish
+  # never moves it. It points at the digest the server job pushed.
+  latest:
+    name: Move the latest image tag
+    needs: [verify, server, publish]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/cinevault-fr
+      DIGEST: ${{ needs.server.outputs.digest }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag the image as latest
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$DIGEST"
+          docker buildx imagetools inspect "$IMAGE:latest"

@@ -1,0 +1,476 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  RouterProvider,
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+} from "@tanstack/react-router";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { setOrganizeBackend } from "../rename/organizeBackend";
+import { createSyntheticOrganizeBackend } from "../rename/syntheticOrganize";
+import { setProvidersBackend } from "../providers/providersBackend";
+import type { ProviderCredentials, ProvidersBackend } from "../providers/providersBackend";
+import { createSyntheticProvidersBackend } from "../providers/syntheticProviders";
+import { SettingsPage } from "./SettingsPage";
+import { settleSettingSaves, useSettingsStore } from "./settingsStore";
+
+async function renderSettings(path = "/settings") {
+  const root = createRootRoute();
+  const router = createRouter({
+    routeTree: root.addChildren([
+      createRoute({
+        getParentRoute: () => root,
+        path: "/settings",
+        validateSearch: (search: Record<string, unknown>) => ({
+          section: typeof search.section === "string" ? search.section : undefined,
+          key: typeof search.key === "string" ? search.key : undefined,
+        }),
+        component: SettingsPage,
+      }),
+    ]),
+    history: createMemoryHistory({ initialEntries: [path] }),
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  await screen.findByRole("heading", { level: 1, name: "Settings" });
+  return router;
+}
+
+/** The synthetic backend with its list narrowed to what a test needs and calls recorded. */
+function recordingBackend(): ProvidersBackend & { tested: Record<string, string>[] } {
+  const inner = createSyntheticProvidersBackend(true);
+  const tested: Record<string, string>[] = [];
+  return {
+    ...inner,
+    tested,
+    test: (provider, drafts) => {
+      tested.push({ provider, ...drafts });
+      return Promise.resolve(
+        drafts.api_key === "bad"
+          ? { ok: false, code: "rejected", message: "TMDB turned this key down." }
+          : { ok: true, code: null, message: null },
+      );
+    },
+  };
+}
+
+beforeEach(() => {
+  setOrganizeBackend(createSyntheticOrganizeBackend());
+});
+afterEach(() => {
+  setProvidersBackend(null);
+  setOrganizeBackend(null);
+});
+
+describe("the Settings page frame", () => {
+  it("is one page with a flat index and the Providers section", async () => {
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    const index = screen.getByRole("navigation", { name: "Settings sections" });
+    expect(within(index).getByRole("button", { name: "Providers" })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(screen.getByRole("heading", { level: 2, name: "Providers" })).toBeVisible();
+  });
+
+  it("scrolls to a section and marks it in the index when its entry is clicked", async () => {
+    const user = userEvent.setup();
+    setProvidersBackend(recordingBackend());
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    await renderSettings();
+    const region = screen.getByRole("region", { name: "Settings" });
+    const scroller = region.querySelector<HTMLElement>(".overflow-y-auto");
+    if (scroller === null) throw new Error("no scroller");
+    const scrollTo = vi.fn();
+    scroller.scrollTo = scrollTo as typeof scroller.scrollTo;
+    // A 600 px pane over 2,000 px of content: it can scroll 1,400 px at most.
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 600 });
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 2000 });
+    const sections = [...region.querySelectorAll<HTMLElement>("[data-settings-section]")];
+    sections.forEach((node, n) => {
+      node.getBoundingClientRect = () => ({ top: n * 300 }) as DOMRect;
+    });
+    const index = screen.getByRole("navigation", { name: "Settings sections" });
+    const entries = within(index).getAllByRole("button");
+    const second = entries[1];
+    const last = entries[entries.length - 1];
+    if (second === undefined || last === undefined) throw new Error("no index entries");
+
+    await user.click(second);
+    expect(scrollTo).toHaveBeenLastCalledWith(expect.objectContaining({ top: 300 }));
+    // The last section cannot reach the top: the pane stops at the end of its content, and
+    // nothing outside the pane scrolls.
+    await user.click(last);
+    expect(scrollTo).toHaveBeenLastCalledWith(expect.objectContaining({ top: 1400 }));
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(last).toHaveAttribute("aria-current", "true");
+    Element.prototype.scrollIntoView = () => {};
+  });
+
+  it("follows the scroll: the section at the top of the page is the active one", async () => {
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    const region = screen.getByRole("region", { name: "Settings" });
+    const scroller = region.querySelector<HTMLElement>(".overflow-y-auto");
+    if (scroller === null) throw new Error("no scroller");
+    const sections = [...region.querySelectorAll<HTMLElement>("[data-settings-section]")];
+    // Section n sits at n * 400 px; the page is scrolled by 400 px, so the second is at the top.
+    sections.forEach((node, n) => {
+      node.getBoundingClientRect = () => ({ top: n * 400 - 400 }) as DOMRect;
+    });
+    scroller.getBoundingClientRect = () => ({ top: 0 }) as DOMRect;
+    fireEvent.scroll(scroller);
+    const index = screen.getByRole("navigation", { name: "Settings sections" });
+    const current = within(index)
+      .getAllByRole("button")
+      .find((entry) => entry.getAttribute("aria-current") === "true");
+    expect(current).toBeDefined();
+    expect(sections.length).toBeGreaterThan(0);
+  });
+});
+
+describe("Settings, Providers", () => {
+  it("shows what each saved key does, without ever showing a key", async () => {
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    const omdb = await screen.findByLabelText("OMDb key");
+    const row = omdb.closest("[data-provider]");
+    expect(row).toHaveAttribute("data-state", "active");
+    expect(within(row as HTMLElement).getByText("Works")).toBeVisible();
+    expect(omdb).toHaveValue("");
+    expect(omdb).toHaveAttribute("type", "password");
+  });
+
+  it("tests a typed key, saves it when it works and says Works", async () => {
+    const user = userEvent.setup();
+    const backend = recordingBackend();
+    setProvidersBackend(backend);
+    await renderSettings();
+    const tmdb = await screen.findByLabelText("TMDB key");
+    await user.type(tmdb, "good-key");
+    await user.click(screen.getByRole("button", { name: "Show" }));
+    expect(tmdb).toHaveAttribute("type", "text");
+    await user.click(screen.getByRole("button", { name: "Test the TMDB key" }));
+    await waitFor(() => {
+      expect(
+        within(tmdb.closest("[data-provider]") as HTMLElement).getByText("Works"),
+      ).toBeVisible();
+    });
+    expect(backend.tested[0]).toMatchObject({ provider: "tmdb", api_key: "good-key" });
+    expect(tmdb).toHaveValue("");
+  });
+
+  it("keeps a key that was turned down and says why", async () => {
+    const user = userEvent.setup();
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    const tmdb = await screen.findByLabelText("TMDB key");
+    await user.type(tmdb, "bad");
+    await user.click(screen.getByRole("button", { name: "Test the TMDB key" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("TMDB turned this key down.");
+    expect(tmdb).toHaveValue("bad");
+  });
+
+  it("applies the metadata language at once and stores it", async () => {
+    const user = userEvent.setup();
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    await act(() => useSettingsStore.getState().load());
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Metadata language" }),
+      "Deutsch",
+    );
+    await settleSettingSaves();
+    expect(useSettingsStore.getState().values["metadata.language"]).toBe("de");
+  });
+
+  it("lists the providers as unavailable where there is no credential store", async () => {
+    setProvidersBackend({
+      ...recordingBackend(),
+      available: false,
+      list: () => Promise.resolve<ProviderCredentials[]>([]),
+    });
+    await renderSettings();
+    expect(
+      (await screen.findAllByPlaceholderText("Keys can be set in the desktop app")).length,
+    ).toBe(5);
+  });
+
+  it("offers the optional Fanart.tv and TheTVDB keys like the OMDb one, each with a link to get a key", async () => {
+    const user = userEvent.setup();
+    const backend = recordingBackend();
+    setProvidersBackend(backend);
+    await renderSettings();
+    const tvdb = await screen.findByLabelText("TheTVDB key");
+    const fanart = await screen.findByLabelText("Fanart.tv key");
+    // The synthetic library starts with both saved, one working and one turned down.
+    expect(tvdb.closest("[data-provider]")).toHaveAttribute("data-state", "active");
+    expect(fanart.closest("[data-provider]")).toHaveAttribute("data-state", "rejected");
+    expect(tvdb).toHaveAttribute("type", "password");
+    expect(screen.getByText("Adds TV artwork and episode data.")).toBeVisible();
+    expect(screen.getByText("Adds more artwork.")).toBeVisible();
+    expect(screen.getAllByRole("link", { name: "Get a free key" }).length).toBeGreaterThanOrEqual(
+      5,
+    );
+    await user.type(fanart, "new-key");
+    await user.click(screen.getByRole("button", { name: "Test the Fanart.tv key" }));
+    await waitFor(() => expect(backend.tested.at(-1)).toMatchObject({ provider: "fanart" }));
+  });
+
+  it("puts the cursor in the key a link asks for", async () => {
+    setProvidersBackend(recordingBackend());
+    await renderSettings("/settings?section=providers&key=tvdb");
+    const tvdb = await screen.findByLabelText("TheTVDB key");
+    await waitFor(() => expect(tvdb).toHaveFocus());
+  });
+});
+
+describe("Settings, Naming", () => {
+  const templateField = (name: string) => screen.findByLabelText(`${name} template`);
+
+  it("shows the active templates with their friendly token names and a live example", async () => {
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    expect(await templateField("Movie folder")).toHaveValue("{Title} ({Year})");
+    expect(await templateField("TV episode")).toHaveValue(
+      "{Show} - S{Season00}E{Episode00} - {EpisodeTitle}",
+    );
+    const row = (await templateField("Movie folder")).closest("div[class*='grid']") as HTMLElement;
+    await waitFor(() => {
+      expect(within(row).getByText(/\(\d{4}\)$/)).toBeVisible();
+    });
+  });
+
+  it("inserts a token at the cursor and updates the example at once", async () => {
+    const user = userEvent.setup();
+    const backend = createSyntheticOrganizeBackend();
+    setOrganizeBackend(backend);
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    const field = await templateField("Movie file");
+    await user.click(field);
+    await user.clear(field);
+    await user.type(field, "{{Title} ({{Year})");
+    const tokens = screen.getByRole("group", { name: "Tokens for Movie file" });
+    await user.click(within(tokens).getByRole("button", { name: "{Resolution}" }));
+    expect(field).toHaveValue("{Title} ({Year}){Resolution}");
+    expect(field).toHaveFocus();
+    // The template is saved as a profile of the user's own, in the engine's syntax.
+    await waitFor(async () => {
+      const profiles = await backend.profiles();
+      const active = profiles.profiles.find((profile) => profile.id === profiles.active);
+      expect(active?.builtin).toBe(false);
+      expect(active?.patterns.movie_file).toBe("${title} (${year})${videoFormat}");
+    });
+  });
+
+  it("shows a live example for the TV episode and the token buttons under every field", async () => {
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    const field = await templateField("TV episode");
+    const row = field.closest("div[class*='grid']") as HTMLElement;
+    await waitFor(() => {
+      expect(within(row).getByText("Severance - S02E01 - Hello, Ms. Cobel.mkv")).toBeVisible();
+    });
+    for (const name of ["Movie folder", "Movie file", "TV episode"]) {
+      expect(screen.getByRole("group", { name: `Tokens for ${name}` })).toBeVisible();
+    }
+    const tv = screen.getByRole("group", { name: "Tokens for TV episode" });
+    for (const token of ["Show", "Season00", "Episode00", "EpisodeTitle", "Channels", "HDR"]) {
+      expect(within(tv).getByRole("button", { name: `{${token}}` })).toBeVisible();
+    }
+  });
+
+  describe("Style", () => {
+    const style = () => screen.findByRole("group", { name: "Style" });
+
+    it("fills the three templates at once from a preset", async () => {
+      const user = userEvent.setup();
+      const backend = createSyntheticOrganizeBackend();
+      setOrganizeBackend(backend);
+      setProvidersBackend(recordingBackend());
+      await renderSettings();
+      expect(await templateField("Movie folder")).toHaveValue("{Title} ({Year})");
+      await user.click(within(await style()).getByRole("button", { name: "Detailed" }));
+      await waitFor(() => {
+        expect(screen.getByLabelText("Movie folder template")).toHaveValue(
+          "{Title} ({Year}) [{Resolution}] [{Source}] [{HDR}] [{AudioCodec} {Channels}]",
+        );
+      });
+      expect(screen.getByLabelText("Movie file template")).toHaveValue(
+        "{Title} ({Year}) [{Resolution}] [{Source}] [{HDR}] [{AudioCodec} {Channels}]",
+      );
+      expect(screen.getByLabelText("TV episode template")).toHaveValue(
+        "{Show} - S{Season00}E{Episode00} - {EpisodeTitle} [{Resolution}] [{Source}] [{HDR}] [{AudioCodec} {Channels}]",
+      );
+      expect((await backend.profiles()).active).toBe("detailed");
+      expect(within(await style()).getByRole("button", { name: "Detailed" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      // A preset over a preset asks nothing.
+      expect(screen.queryByText(/Replace your custom templates/)).toBeNull();
+    });
+
+    it("switches to Custom when a field is edited, and asks before a preset replaces it", async () => {
+      const user = userEvent.setup();
+      const backend = createSyntheticOrganizeBackend();
+      setOrganizeBackend(backend);
+      setProvidersBackend(recordingBackend());
+      await renderSettings();
+      expect(within(await style()).queryByRole("button", { name: "Custom" })).toBeNull();
+      const field = await templateField("Movie folder");
+      await user.click(field);
+      await user.type(field, " x");
+      const group = await style();
+      await waitFor(() => {
+        expect(within(group).getByRole("button", { name: "Custom" })).toHaveAttribute(
+          "aria-pressed",
+          "true",
+        );
+      });
+      await settleSettingSaves();
+
+      await user.click(within(group).getByRole("button", { name: "Clean" }));
+      expect(
+        await screen.findByText(/Replace your custom templates with the Clean style/),
+      ).toBeVisible();
+      // Nothing is replaced until the answer.
+      expect(field).toHaveValue("{Title} ({Year}) x");
+      await user.click(screen.getByRole("button", { name: "Keep mine" }));
+      await waitFor(() => {
+        expect(screen.queryByText(/Replace your custom templates with/)).toBeNull();
+      });
+      expect(within(group).getByRole("button", { name: "Custom" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      expect((await backend.profiles()).profiles.some((p) => !p.builtin)).toBe(true);
+
+      await user.click(within(group).getByRole("button", { name: "Clean" }));
+      await user.click(await screen.findByRole("button", { name: "Replace" }));
+      await waitFor(() => {
+        expect(screen.getByLabelText("Movie folder template")).toHaveValue("{Title} ({Year})");
+      });
+      const saved = await backend.profiles();
+      expect(saved.active).toBe("clean");
+      expect(saved.profiles.some((p) => !p.builtin)).toBe(false);
+      expect(within(group).queryByRole("button", { name: "Custom" })).toBeNull();
+    });
+  });
+
+  it("says why a template is invalid and keeps the last valid one in use", async () => {
+    const user = userEvent.setup();
+    const backend = createSyntheticOrganizeBackend();
+    setOrganizeBackend(backend);
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    const field = await templateField("Movie folder");
+    await user.click(field);
+    await user.clear(field);
+    await user.type(field, "{{Title");
+    expect(await screen.findByText(/The brace in "\{Title" is not closed/)).toBeVisible();
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    const saved = await backend.profiles();
+    expect(saved.active).toBe("clean");
+    expect(saved.profiles.find((p) => p.id === "clean")?.patterns.movie_folder).toBe(
+      "${title} (${year})",
+    );
+  });
+
+  it("offers the release tokens and fills the templates from the Release info style", async () => {
+    const user = userEvent.setup();
+    setOrganizeBackend(createSyntheticOrganizeBackend());
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    await templateField("Movie file");
+    for (const name of ["Movie file", "TV episode"]) {
+      const tokens = screen.getByRole("group", { name: `Tokens for ${name}` });
+      for (const token of ["Quality", "ReleaseTags", "ReleaseGroup"]) {
+        expect(within(tokens).getByRole("button", { name: `{${token}}` })).toBeVisible();
+      }
+    }
+    const styles = await screen.findByRole("group", { name: "Style" });
+    await user.click(within(styles).getByRole("button", { name: "Release info" }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Movie file template")).toHaveValue(
+        "{Title}{ - Edition?} ({Year}) [{ReleaseTags}]{-ReleaseGroup?}",
+      );
+    });
+    expect(screen.getByLabelText("Movie folder template")).toHaveValue("{Title} ({Year})");
+  });
+
+  it("stores Metadata only at once from its switch in Naming", async () => {
+    const user = userEvent.setup();
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    await act(() => useSettingsStore.getState().load());
+    const toggle = screen.getByRole("switch", { name: "Metadata only" });
+    expect(toggle).not.toBeChecked();
+    await user.click(toggle);
+    await settleSettingSaves();
+    expect(useSettingsStore.getState().values["renamer.metadata-only"]).toBe(true);
+  });
+
+  it("stores Rename after Scrape from its switch, and holds it off while Metadata only is on", async () => {
+    const user = userEvent.setup();
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    await act(() => useSettingsStore.getState().load());
+    const toggle = screen.getByRole("switch", { name: "Rename after Scrape" });
+    expect(toggle).not.toBeChecked();
+    await user.click(toggle);
+    await settleSettingSaves();
+    expect(useSettingsStore.getState().values["renamer.after-scrape"]).toBe(true);
+    await user.click(screen.getByRole("switch", { name: "Metadata only" }));
+    await settleSettingSaves();
+    const held = screen.getByRole("switch", { name: "Rename after Scrape" });
+    expect(held).toBeDisabled();
+    expect(held).not.toBeChecked();
+    expect(screen.getByText("Off while Metadata only is on.")).toBeInTheDocument();
+  });
+
+  it("stores the folder for loose files switch, on by default, and holds it off while Metadata only is on", async () => {
+    const user = userEvent.setup();
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    await act(() => useSettingsStore.getState().load());
+    const name = "Create a folder for loose files when scraping";
+    const toggle = screen.getByRole("switch", { name });
+    expect(toggle).toBeChecked();
+    await user.click(toggle);
+    await settleSettingSaves();
+    expect(useSettingsStore.getState().values["library.folder-loose-files"]).toBe(false);
+    await user.click(screen.getByRole("switch", { name }));
+    await settleSettingSaves();
+    expect(screen.getByRole("switch", { name })).toBeChecked();
+    await user.click(screen.getByRole("switch", { name: "Metadata only" }));
+    await settleSettingSaves();
+    const held = screen.getByRole("switch", { name });
+    expect(held).toBeDisabled();
+    expect(held).not.toBeChecked();
+    expect(
+      screen.getByText("Off while Metadata only is on, because no file is moved then."),
+    ).toBeInTheDocument();
+  });
+
+  it("stores the colon style and shows it in the example", async () => {
+    const user = userEvent.setup();
+    setProvidersBackend(recordingBackend());
+    await renderSettings();
+    await act(() => useSettingsStore.getState().load());
+    await user.click(screen.getByRole("button", { name: "Use “꞉”" }));
+    await settleSettingSaves();
+    expect(useSettingsStore.getState().values["naming.colon"]).toBe("lookalike");
+  });
+});

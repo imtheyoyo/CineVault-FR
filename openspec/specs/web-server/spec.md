@@ -1,0 +1,615 @@
+# web-server Specification
+
+## Purpose
+Runs CineVault on the machine that holds the media files and serves the same interface and the same actions to a browser on another machine, so a server with no desktop session needs no mounted drives and the person using it needs no desktop app.
+
+## Requirements
+
+### Requirement: Headless server
+CineVault SHALL provide a server program that runs on Linux without a display, a desktop session or a window, opens the library of its data folder and serves the interface as static files with the command surface behind it. It SHALL bind its port before it starts the library's background work, so a health check answers while the library is opening, and SHALL answer 503 until the library is ready. It SHALL log to standard output and standard error, SHALL exit with a non-zero code when the data folder cannot be opened, and SHALL handle termination requests by pausing running jobs and removing its owner file so the next start resumes them.
+
+#### Scenario: Start on a server with no display
+- **WHEN** the server program is started on a Linux machine with no `DISPLAY` and a data folder that holds a library
+- **THEN** it prints the address it listens on, `/healthz` answers 503 while the library opens and 200 once it is ready, and `GET /` answers with the interface
+
+#### Scenario: Library cannot be opened
+- **WHEN** the data folder holds a library from a newer schema
+- **THEN** the program prints the reason, answers 503, and exits with a non-zero code
+
+#### Scenario: Clean stop
+- **WHEN** the process is asked to terminate while a scan runs
+- **THEN** the job is paused, the owner file is removed, and the next start resumes the scan
+
+### Requirement: Full command parity
+Every command the desktop application offers SHALL be available through the server with the same inputs, outputs, errors and side effects, except the commands the "Desktop-only commands" requirement names. The server's dispatcher SHALL be a table separate from the desktop registry, and a check SHALL fail when a command is missing from either table or an argument name differs between them. Commands that complete only after long work (a cross-drive move, a tool download, a first-run analysis) SHALL return an operation id and stream their progress instead of holding one request open.
+
+#### Scenario: A page that is not the library
+- **WHEN** a signed-in user opens Settings, a movie page, the artwork picker, the rename preview and the History page in a browser
+- **THEN** each page loads its data and its actions work as they do in the desktop app
+
+#### Scenario: A command missing from the server
+- **WHEN** a command is registered for the desktop app and not for the server
+- **THEN** the parity check fails and names the missing command
+
+#### Scenario: An argument renamed on one side
+- **WHEN** the server expects `stop_jobs` and the desktop registry says `stopJobs`
+- **THEN** the parity check fails and names the command and the argument
+
+#### Scenario: A long move behind a proxy
+- **WHEN** a move of a large title starts from a browser behind a reverse proxy with a 60-second read timeout
+- **THEN** the start call answers with an operation id before the timeout and progress continues on the stream
+
+### Requirement: First-run welcome
+On a start with no password set, the headless server SHALL serve a welcome page that asks for a new password of at least 12 characters and a confirmation, and nothing else. There SHALL be no default password and no setup token. The welcome pages SHALL be available for as long as no password exists, but only to browsers from the home network as the "Forwarded requests are not from the home network" requirement judges it: a loopback, private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), link-local (`169.254/16`, `fe80::/10`) or carrier-grade NAT (`100.64/10`) client address, taken from the socket peer, or from `X-Forwarded-For` only when the peer is a trusted proxy, and never for a request that carries a forwarding header from a peer that is not a trusted proxy. A browser from any other address SHALL get a page that says "Finish setup from your home network." and names the server's password command, and SHALL NOT be able to set a password. The first home-network browser to open the welcome page SHALL claim the setup with a setup cookie; a second browser SHALL be refused while the claim is in use, and a claim unused for 30 minutes SHALL lapse. The welcome page SHALL say plainly that setup must be finished before the server is made reachable from the internet. The desktop app's Browser access SHALL never show the welcome page; its password is set in the app's Settings.
+
+#### Scenario: First visit
+- **WHEN** the server starts on a new data folder and a browser on the same network opens the address
+- **THEN** the welcome page asks for a password and its confirmation, and nothing else is served
+
+#### Scenario: Second browser during setup
+- **WHEN** a second browser opens the welcome page while the first one holds the setup
+- **THEN** it is told that setup is in progress on another browser and no password can be set from it
+
+#### Scenario: Setup window closed
+- **WHEN** a password exists and a browser opens the welcome page
+- **THEN** it is sent to the sign-in page, and the password can be changed only from a signed-in session, with a reset PIN or with the server's password command
+
+#### Scenario: Setup from a public address
+- **WHEN** no password exists and a browser at a public address opens the server
+- **THEN** it is told to finish setup from the home network and no password can be set from it
+
+#### Scenario: Welcome after a long time
+- **WHEN** the server has run for two hours without a password and a home-network browser opens it
+- **THEN** the welcome page is served and the password can be set
+
+#### Scenario: Abandoned claim
+- **WHEN** the browser that claimed setup is closed and another home-network browser opens the welcome page 31 minutes later
+- **THEN** the second browser claims the setup and can set the password
+
+#### Scenario: Desktop Browser access
+- **WHEN** a browser opens `/setup` on the desktop app's Browser access
+- **THEN** it is sent to the sign-in page
+
+#### Scenario: Setup through an untrusted local proxy
+- **WHEN** no password exists, `CINEVAULT_WEB_TRUST_PROXY` is unset, and a request arrives from `127.0.0.1` with `X-Forwarded-For: 203.0.113.7`
+- **THEN** it is told to finish setup from the home network and no password can be set from it
+
+### Requirement: Sign-in
+The server SHALL have exactly one user. Before any page, API call, image, media file or stream is served, except the welcome pages, the sign-in page, the health endpoint and the sign-in and setup requests themselves, the request SHALL carry a valid session. A session cookie SHALL be `HttpOnly` and `SameSite=Strict`, SHALL be `Secure` when the effective scheme is HTTPS, SHALL expire after 30 days of no use or 90 days in total, and SHALL be one of at most 32 live sessions, the oldest being evicted first. Signing out SHALL end the session on the server and close that session's streams. Five failed sign-ins from one address within one minute SHALL be answered with "Too many attempts. Wait a minute and try again." and no password check. A global ceiling of 100 failed sign-ins a minute SHALL refuse further sign-ins only from addresses outside the home network, so a flood cannot lock out a home-network browser, and SHALL never end a signed-in session. A request without a session SHALL be refused with the typed value `{code: "signed_out"}` and no library data.
+
+#### Scenario: Signed out
+- **WHEN** a browser without a session asks for `/library`, `/api/invoke`, `/img/<key>/grid`, `/api/media/1/0` or `/api/stream`
+- **THEN** each is refused as signed out and no bytes of the page, command, image or media file are sent
+
+#### Scenario: Wrong password
+- **WHEN** the user enters a wrong password five times in a minute
+- **THEN** the sixth attempt is refused without checking the password, and the message names the wait
+
+#### Scenario: Sign out
+- **WHEN** the user signs out and the browser sends the old cookie
+- **THEN** the server answers as signed out, and an open stream from that session is closed
+
+#### Scenario: Session cap
+- **WHEN** 33 sessions are created
+- **THEN** the oldest is ended and the newest 32 stay
+
+#### Scenario: Flood from the internet
+- **WHEN** 100 wrong passwords arrive within a minute from many public addresses and the owner then signs in from 192.168.1.30 with the right password
+- **THEN** the owner is signed in, a new attempt from another public address is refused as too many attempts, and an already signed-in browser keeps working
+
+### Requirement: Write protection
+Every command invocation SHALL require the session's CSRF token, on reads as well as writes. A request that carries an `Origin` SHALL be refused unless it matches the effective host; a request without an `Origin` SHALL be judged by the CSRF token alone. A missing or mismatched token, or a mismatched `Origin`, SHALL be refused with 403 and no change. The token SHALL be issued with the session and rotated on sign-in.
+
+#### Scenario: Missing CSRF token
+- **WHEN** a signed-in browser sends an invoke without the CSRF token
+- **THEN** the answer is 403 and the command does not run
+
+#### Scenario: Foreign origin
+- **WHEN** a request arrives with an `Origin` for another host
+- **THEN** the answer is 403 and no command runs
+
+#### Scenario: No Origin header
+- **WHEN** a client with a valid session cookie and CSRF token sends an invoke without an `Origin`
+- **THEN** the command runs, and the same request without the token is refused with 403
+
+### Requirement: Network exposure
+The server SHALL listen on `127.0.0.1` unless the operator asks for another address. It SHALL print the address and whether it is reachable beyond the machine. `CINEVAULT_WEB_TRUST_PROXY` SHALL name the proxy addresses (CIDRs); only requests from those addresses SHALL be allowed to set the effective scheme from `X-Forwarded-Proto`, the client address from `X-Forwarded-For` and the host from `X-Forwarded-Host`. Without a trusted proxy the socket peer and the connection's own scheme SHALL be used. The server SHALL NOT redirect HTTP to HTTPS itself; the documentation SHALL describe putting it behind a reverse proxy for HTTPS. The sign-in and welcome pages SHALL warn when the effective connection is plain HTTP and the address is not loopback.
+
+#### Scenario: Default address
+- **WHEN** the server starts with no address configured
+- **THEN** it listens only on `127.0.0.1`
+
+#### Scenario: Plain HTTP on the LAN
+- **WHEN** the server is bound to a LAN address and opened over HTTP without a trusted proxy
+- **THEN** the welcome and sign-in pages say the connection is not encrypted and point at the documentation
+
+#### Scenario: Trusted proxy
+- **WHEN** `CINEVAULT_WEB_TRUST_PROXY=10.0.0.0/8` is set and a request from `10.0.0.2` carries `X-Forwarded-Proto: https`
+- **THEN** the session cookie is `Secure` and the request is treated as HTTPS
+
+#### Scenario: Spoofed proxy header
+- **WHEN** a request from an address outside the trusted range carries `X-Forwarded-Proto: https`
+- **THEN** the header is ignored and the connection is treated as plain HTTP
+
+### Requirement: Request limits and path safety
+The server SHALL cap a command request at 1 MiB, an artwork upload at 32 MiB plus multipart overhead, and a request body at 33 MiB overall, and SHALL time out a request that sends no body bytes for 30 seconds. A stream connection SHALL NOT be closed by that body timeout; it SHALL be kept alive by a comment or ping at least every 20 seconds. Static file serving SHALL refuse any path that resolves outside the interface folder. The folder browser SHALL accept only absolute paths and SHALL refuse a path outside the configured roots. The image route SHALL accept only a parsed 32-character key and a size word. The media route SHALL accept only an item and part number, SHALL canonicalise the file, SHALL require it to be inside a library folder using a component-wise comparison, and SHALL re-resolve it on every request. No route SHALL answer with the contents of an arbitrary file.
+
+#### Scenario: Path traversal
+- **WHEN** a request asks for `/../../etc/passwd` or an encoded form of it
+- **THEN** the server answers 404 and no file outside the interface folder is read
+
+#### Scenario: Folder browser escape
+- **WHEN** the folder browser is asked for a path outside the allowed roots
+- **THEN** it refuses with "That folder is outside the folders this server may browse." and lists nothing
+
+#### Scenario: Symlink planted after the scan
+- **WHEN** a symbolic link inside a library folder points outside it and a media request follows it
+- **THEN** the request is refused with 404 and no bytes are sent
+
+#### Scenario: Idle stream
+- **WHEN** a stream connection is open for two minutes with no messages
+- **THEN** it stays open and the browser reconnects normally after a network drop
+
+### Requirement: Browser shell
+The interface served to a browser SHALL show the same sidebar, pages, pickers, search, selection, keyboard model and themes as the desktop app. It SHALL NOT show window controls, a tray, a taskbar or dock, and it SHALL use the browser's own back and forward history. The document title SHALL name the page and the app. An address that names a page SHALL open that page after sign-in. `index.html` SHALL NOT be cached; hashed assets SHALL be immutable. A build id SHALL be checked on load, and a mismatch SHALL offer "CineVault was updated, reload".
+
+#### Scenario: Deep link
+- **WHEN** a signed-in user opens `/movies/42`
+- **THEN** the Movie page of that title opens, and the browser's back button returns to the previous page
+
+#### Scenario: No window controls
+- **WHEN** any page is open in a browser
+- **THEN** no minimize, maximize or close control and no taskbar progress is shown
+
+#### Scenario: Stale bundle after an update
+- **WHEN** the server is updated while a tab is open and the tab loads a page again
+- **THEN** the build id differs and the page offers to reload
+
+### Requirement: Images
+In a browser, images SHALL be served by the server at `/img/<key>/<size>` for the same key and size words as the desktop image protocol, with the same content types, ETag and 304 answer, the same 404 for an unknown key, the same 405 for methods other than GET and HEAD, the same `full` original and hero stand-in rules, and the same "largest cached size with `no-store`" stand-in for a size that cannot be made yet. The route SHALL require a session. Its cache header SHALL be `private, max-age=31536000, immutable` and it SHALL NOT send a cross-origin allowance. Only a parsed 32-character key and a size word SHALL reach the file system.
+
+#### Scenario: A repeated request
+- **WHEN** the browser asks again for a grid thumbnail with the ETag it holds
+- **THEN** the server answers 304 and sends no image
+
+#### Scenario: Signed out image request
+- **WHEN** an image is requested without a session
+- **THEN** it is refused as signed out and no image is sent
+
+#### Scenario: Unknown key
+- **WHEN** a browser asks for `/img/not-a-key/grid`
+- **THEN** the answer is 404 and no file is read
+
+#### Scenario: Wrong method
+- **WHEN** a browser sends POST to an image address
+- **THEN** the answer is 405
+
+### Requirement: Streams
+Job progress, notices and every stream a page opens (scrape candidates, artwork candidates, torrent results, tool installs and update downloads) SHALL reach the browser over one Server-Sent Events connection per page. The page SHALL mint a client id and send it on the stream and on every command, so a stream is bound to the page that opened it and not to the shared session cookie. Each message SHALL carry a monotonic id, an event kind and the stream id. A dropped connection SHALL reconnect within five seconds and send `Last-Event-ID`; the server SHALL replay from a bounded per-client buffer. When the buffer overflows, the server SHALL send a `reset` and the page SHALL reload that stream's or job's state before continuing, so no item is doubled or lost. Signing out, changing the password and session expiry SHALL close that session's connections.
+
+#### Scenario: Dropped connection during a scrape
+- **WHEN** the connection drops while a scrape is streaming candidates and reconnects
+- **THEN** the page receives the candidates it missed and the result is the same as without the drop
+
+#### Scenario: Buffer overflow
+- **WHEN** a page misses more events than the buffer holds
+- **THEN** it receives `reset`, reloads the stream state and continues without duplicate items
+
+#### Scenario: Idle
+- **WHEN** no job is running and no stream is open
+- **THEN** the connection carries no progress messages
+
+#### Scenario: Sign-out with an open stream
+- **WHEN** the user signs out while a scrape stream is open
+- **THEN** the connection is closed and no further candidates are sent
+
+### Requirement: Server folder browser
+Where the desktop app opens the system folder picker or accepts a folder dropped on the window, the browser SHALL show a folder browser over the server's file system: it lists folders with their names, navigates by opening one or by typing an absolute path, shows the current path in full, can make a folder, and can choose the current folder. The roots SHALL default to the data folder and the existing library folders; `/` SHALL require an explicit `CINEVAULT_WEB_ROOTS=/`. It SHALL show no file contents and SHALL list only folders. It SHALL refuse a path outside the roots with the message in "Request limits and path safety". Making a folder SHALL require the CSRF token, SHALL refuse a dot-directory and a path outside the roots, and SHALL have no undo beyond deleting the empty folder. A folder dropped on the page SHALL NOT be accepted as a path, because a browser does not provide one; the page SHALL say "Use Add folder…".
+
+#### Scenario: Add a library folder
+- **WHEN** a signed-in user chooses "Add folder…" in Settings › Library folders
+- **THEN** the folder browser opens at a root, and choosing `/media/movies` adds it as a library folder
+
+#### Scenario: Typed path
+- **WHEN** the user types `/media/movies` and confirms
+- **THEN** the browser lists that folder, or says it is not a folder
+
+#### Scenario: Make a folder
+- **WHEN** the user makes `Season 1` inside `/media/tv/Example Show`
+- **THEN** the folder exists, and making `.ssh` or a path outside the roots is refused
+
+#### Scenario: Dropped folder
+- **WHEN** the user drops a folder on the first-run page
+- **THEN** the page says "Use Add folder…" and no path is added
+
+### Requirement: Artwork uploads
+Where the desktop app accepts an image dropped from the desktop, the browser SHALL accept a file chosen or dropped on the picker. The upload SHALL accept PNG, JPEG, WebP and AVIF only, refuse a file over 32 MiB with "That image is larger than 32 MiB.", verify the file is an image by its content rather than its name, and add it to the preview rather than writing it. Pressing "Use this" SHALL write it through the same artwork path as a downloaded candidate, including the undo entry and the deleted-files destination. The request body SHALL be staged in the data folder only for validation; the final file SHALL be written beside its target so the replace is atomic on a different volume. A temporary file left by an interrupted upload SHALL be cleaned on the next start.
+
+#### Scenario: Upload a poster
+- **WHEN** the user chooses a 3000×4500 JPEG for the poster slot and presses "Use this"
+- **THEN** it is written as the poster with the configured file name, the previous poster goes to the deleted-files destination, and Undo restores it
+
+#### Scenario: Not an image
+- **WHEN** a file named `poster.png` holds a zip archive
+- **THEN** the upload is refused with "That file is not an image."
+
+#### Scenario: Cross-volume write
+- **WHEN** the data folder and the media folder are different volumes and the server dies during the write
+- **THEN** the old poster is still in place, and the next start removes the temporary file
+
+### Requirement: Browser playback
+Play in a browser SHALL offer "Play in browser", "Copy stream link" and, when Kodi is configured, "Open in Kodi". The browser player SHALL use a media route that answers range requests, sends a video content type from an allowlist and `application/octet-stream` for anything else, sets `X-Content-Type-Options: nosniff` and a sandboxing CSP, and refuses a file outside the library folders. A download route SHALL always answer `Content-Disposition: attachment`. A stacked title SHALL be offered as its parts in order. A disc folder SHALL open its main index file when it is readable, else Play SHALL be off with a sentence. When the browser cannot decode the file, the page SHALL say so and offer the stream link and the download instead of a failing player. No player SHALL be started on the server.
+
+#### Scenario: Play a movie
+- **WHEN** the user presses Play in a browser on a movie the browser can decode
+- **THEN** the browser's own player starts, seeking works, and no process starts on the server
+
+#### Scenario: A format the browser cannot play
+- **WHEN** the file is a DTS-in-MKV the browser cannot decode
+- **THEN** the page says the browser cannot play it and offers the stream link and the download
+
+#### Scenario: Stacked movie
+- **WHEN** a movie has two parts
+- **THEN** the browser receives both parts in order and plays them one after the other
+
+#### Scenario: File moved away
+- **WHEN** a movie's video file was deleted outside CineVault and the user presses Play in a browser
+- **THEN** Play is off and says the file is not on disk
+
+#### Scenario: Outside the library
+- **WHEN** a media address names a file outside every library folder
+- **THEN** the server answers 404 and sends no bytes
+
+### Requirement: One writer
+The server SHALL hold the data folder for as long as it runs, through a portable owner file in the data folder that records its role, process, host, start time, protocol and a heartbeat no older than 30 seconds. The desktop app SHALL refuse to open a data folder whose owner is a fresh server, and SHALL say so in the window. The `cinevault` command line SHALL try the server's local channel; when the owner file says a server holds the folder and the channel is unreachable, it SHALL exit with code 2 and a sentence naming the server, and SHALL NOT open the library itself. A second server on the same data folder SHALL refuse to start and say why. A stale owner SHALL be taken over after 30 seconds. The documentation SHALL say the data folder must be on a local filesystem, not an SMB or NFS share.
+
+#### Scenario: Desktop app on the same folder
+- **WHEN** the desktop app is started with the data folder the server holds
+- **THEN** it says the library is in use by the server and opens no library
+
+#### Scenario: CLI while the server runs
+- **WHEN** `cinevault movie --rename-all` runs while the server holds the data folder and its channel is reachable
+- **THEN** the server runs the batch and the command line prints its report
+
+#### Scenario: CLI on the host, server in a container
+- **WHEN** the host CLI sees the server's owner file but cannot reach its socket
+- **THEN** it exits with code 2, names the server and opens no library
+
+#### Scenario: Crashed server
+- **WHEN** the server crashed and left an owner file whose heartbeat is 31 seconds old
+- **THEN** the desktop app takes the folder over
+
+### Requirement: Server settings
+Settings SHALL gain a Server section, shown only when the page is served to a browser by the server or by the desktop app's Browser access, with the address and port (read-only, with the reason in a hint), the running version, the session lifetime, "Change password", "Sign out every session", "Allow permanent delete", the Kodi connection (host, port, optional credentials, path mapping) and the trusted proxy state. When the page is served by the desktop app, the hint SHALL say that Browser access is managed in CineVault's Settings on that computer. Changing the password SHALL require the current password and SHALL end every other session. Permanent delete SHALL be off by default.
+
+#### Scenario: Change the password
+- **WHEN** the user changes the password from Settings › Server
+- **THEN** the current session stays signed in, every other session is signed out, and the next sign-in needs the new password
+
+#### Scenario: Desktop app
+- **WHEN** Settings is opened in the desktop app's own window
+- **THEN** no Server section is shown and the Browser access section is
+
+#### Scenario: Permanent delete off
+- **WHEN** permanent delete has not been enabled and a browser asks to erase a title
+- **THEN** the request is refused and the UI offers the configured deleted-files destination instead
+
+### Requirement: Permanent delete from a browser
+When permanent delete is enabled, the server SHALL mint a one-time intent bound to the exact item IDs, valid for 60 seconds. The erase request SHALL carry that intent and the current password; a missing, reused, expired or mismatched intent, or a wrong password, SHALL be refused before any file is touched. The bin/trash delete SHALL keep its no-dialog behaviour.
+
+#### Scenario: Erase with an intent
+- **WHEN** the user confirms permanent delete and sends the minted intent with the current password
+- **THEN** the listed files are erased and a History entry records every path
+
+#### Scenario: Replayed intent
+- **WHEN** the same intent is sent twice
+- **THEN** the second request is refused and no file is touched
+
+#### Scenario: Bin delete
+- **WHEN** the user deletes a title to the configured destination
+- **THEN** no confirmation dialog is shown and the title can be restored
+
+### Requirement: Health
+The server SHALL answer `GET /healthz` without a session with 200 and `{"status":"ok"}` when the library is open, and 503 with the reason while it is starting or after the library became unreadable. When the server's provider-key master key is not available, the answer SHALL say `"keys":"locked"` and the server SHALL still be healthy. The answer SHALL hold no library data.
+
+#### Scenario: Container health check
+- **WHEN** the container's health check asks `/healthz` after the library opened
+- **THEN** the answer is 200 and the container is healthy
+
+#### Scenario: Starting
+- **WHEN** `/healthz` is asked before the library is open
+- **THEN** the answer is 503
+
+#### Scenario: Keys locked
+- **WHEN** the library is open but no master key is configured
+- **THEN** the answer is 200 with `"keys":"locked"`, and Settings says how to set it
+
+### Requirement: Packaging
+A Linux release SHALL publish a container image for amd64 and arm64 under `ghcr.io/<owner>/cinevault`, a `cinevault-server` `.deb` and `.rpm` (distinct from the desktop `cinevault` package), and a tarball, all built from the same source and carrying the same version. The image SHALL run as a non-root user, SHALL accept `PUID`/`PGID`, SHALL mount the data folder and the library folders read-write, SHALL declare a health check and SHALL default the deleted-files destination to `.deletedByCineVault` because the freedesktop trash is not writable on a bind mount. The packages SHALL contain the server, the `cinevault` command line and the interface assets. The repository SHALL hold a Docker Compose example and a systemd unit example. Setup SHALL write and remove a probe file in every library folder and say "This folder is not writable by the server" when it cannot.
+
+#### Scenario: Compose with two volumes
+- **WHEN** the image is started with the data folder and `/media/movies` mounted read-write
+- **THEN** the library is served, `/media/movies` can be added, and a rename in it succeeds
+
+#### Scenario: Non-root
+- **WHEN** the image starts with its default user
+- **THEN** no process in it runs as root, and the mounted folders are writable by its user
+
+#### Scenario: Read-only library folder
+- **WHEN** a library folder cannot be written
+- **THEN** setup says "This folder is not writable by the server" before the scan starts
+
+#### Scenario: arm64 tools
+- **WHEN** the arm64 image runs a scan and a media info read
+- **THEN** MediaInfo and FFmpeg are available for `linux-aarch64`, or the release does not offer arm64
+
+### Requirement: Server updates
+The server SHALL NOT install the desktop update. Settings › Updates in a browser SHALL say that the server is updated by pulling a new image or installing a new package, SHALL show the running version, and SHALL link to the release notes. `index.html` SHALL be served `no-store`, hashed assets immutably, and a build-id mismatch SHALL offer a reload. The in-app installer and the signed update manifest SHALL remain desktop-only.
+
+#### Scenario: Updates in a browser
+- **WHEN** the user opens Settings › Updates in a browser
+- **THEN** no Install button is shown, and the page names the image or package and the running version
+
+#### Scenario: Rollback
+- **WHEN** a newer server migrated the library and an older server is started on it
+- **THEN** it refuses the library and says a same-or-newer version is needed
+
+### Requirement: Desktop-only commands
+A command that cannot work in a browser (starting a local player, opening a folder or a web page on the client, changing the window, the taskbar mirror, installing the desktop update, the taskbar/tray controls) or that would let a browser choose a program the host runs SHALL answer `{code: "not_applicable", message}` where the message says what replaces it or why the browser has no equivalent, and SHALL NOT fail silently or leave a spinner. The interface SHALL hide or disable the control that would call it. The desktop-only list SHALL include `open_folder`, `pick_folder`, `pick_files`, `play_external`, `open_rating_page`, `open_logs`, `torrent_open_page`, `torrent_open_magnet`, `torrent_open_torrent_file`, `torrent_open_indexer_manager`, `set_tool_path`, the window and taskbar commands and `install_update`.
+
+#### Scenario: Open folder
+- **WHEN** a browser asks to open a title's folder
+- **THEN** the answer is `not_applicable` with "The folder is on the server.", and the button is not shown
+
+#### Scenario: Torrent hand-off
+- **WHEN** a browser sends a release to the torrent app
+- **THEN** the magnet opens through the browser and the toast offers "Copy magnet link"
+
+#### Scenario: Tool path from a browser
+- **WHEN** a browser asks to use `\\files\share\ffmpeg.exe` as FFmpeg
+- **THEN** the answer is `not_applicable` with "A tool's path is set on the computer that runs CineVault.", the file is not run, and the tool's path is unchanged
+
+### Requirement: Multiple clients
+Every job SHALL record the client and session that started it. The interface SHALL show "Started from another session" on a job another session started, and cancelling or pausing it from a different session SHALL ask first. Shared operation slots (a move, a tool download, an update install) SHALL answer a busy error keyed by operation id instead of replacing each other's work.
+
+#### Scenario: Two tabs
+- **WHEN** a scan is started in one tab and the second tab lists the jobs
+- **THEN** the job says it was started from another session, and cancelling it from the second tab asks first
+
+#### Scenario: Two moves
+- **WHEN** a second move starts while one runs
+- **THEN** it is refused as busy and the first move is untouched
+
+### Requirement: Kodi
+Settings SHALL offer an optional Kodi connection (host, port, optional credentials and a path mapping), off by default. When it is configured, a finished Scan, Scrape or Rename batch MAY ask Kodi to update its library, and the browser MAY offer "Open in Kodi" for a title. A failure SHALL say Kodi is unreachable and SHALL NOT fail the batch.
+
+#### Scenario: Library update after a scrape
+- **WHEN** a scrape finishes and Kodi is configured
+- **THEN** the server calls Kodi's library scan and the browser shows whether it was asked
+
+#### Scenario: Kodi unreachable
+- **WHEN** Kodi does not answer
+- **THEN** the toast says Kodi is unreachable and the scrape result is kept
+
+### Requirement: Browser access from the desktop app
+With Browser access on, the desktop app SHALL serve the browser interface from its own process over the library it has open, with the headless server's routes, sign-in, sessions, CSRF and `Origin` checks, rate limits, media session binding, folder roots and commands. It SHALL open no second library and take no second owner file. Provider keys SHALL stay in the OS credential store and be used without being sent. The command line SHALL keep forwarding batches to the app.
+
+#### Scenario: Switch on
+- **WHEN** the user sets a password and turns Browser access on with port 8787
+- **THEN** `http://<the computer's address>:8787/` answers with the sign-in page, and signing in shows the library the app has open
+
+#### Scenario: Provider key from a browser
+- **WHEN** a signed-in browser scrapes a title in the app's Browser access
+- **THEN** the scrape uses the key from the app's credential store, and the Providers section in the browser shows the key as entered without its value
+
+#### Scenario: Command line while Browser access runs
+- **WHEN** `cinevault movie --rename-all` runs while the app serves Browser access
+- **THEN** the batch runs in the app as before and both the window and the browser see the renamed titles
+
+#### Scenario: Desktop-only commands from a browser
+- **WHEN** a browser invokes a Browser access command (turn on or off, set the password, change the port)
+- **THEN** it is answered as not applicable and nothing changes
+
+### Requirement: Browser access port
+The desktop app SHALL listen on all IPv4 addresses on the chosen port (8787 by default) only while Browser access is on, and SHALL NOT start without a password. A port another program holds SHALL leave the server stopped with a sentence naming a free port. Turning Browser access off or changing the port SHALL end every browser session, close every stream and close the old port.
+
+#### Scenario: Port in use
+- **WHEN** another program listens on the chosen port and Browser access is turned on
+- **THEN** nothing is started, the section says "Port 8787 is in use by another program. Choose another port, such as 8788.", and choosing a free port starts it
+
+#### Scenario: Switch off
+- **WHEN** Browser access is turned off while a browser is signed in and playing a title
+- **THEN** the port no longer accepts connections, the playback stops, and the browser's next request is answered as signed out
+
+#### Scenario: Restart with a new port
+- **WHEN** the port is changed from 8787 to 8790 while Browser access runs
+- **THEN** 8787 is closed, 8790 serves the sign-in page and every session has ended
+
+### Requirement: Home network only
+While "Only devices on my home network" is on (the default), the desktop app's Browser access SHALL refuse every request whose peer address is not a loopback, private, link-local or carrier-grade NAT address, and every request that carries a forwarding header, with 403 and "Browser access is limited to your home network.".
+
+#### Scenario: Address outside the home network
+- **WHEN** the option is on and a request arrives from a public address
+- **THEN** it is refused with 403 and no page or command is served
+
+#### Scenario: Option off
+- **WHEN** the option is off and a request arrives from a public address
+- **THEN** the sign-in page is served and every other sign-in rule still applies
+
+#### Scenario: Tunnel on the same computer
+- **WHEN** the option is on and a tunnel program on the same computer forwards a visitor's request from `127.0.0.1` with `X-Forwarded-For: 198.51.100.4`
+- **THEN** it is refused with 403 and no page or command is served
+
+### Requirement: Password reset with a PIN
+On the headless server, "Forgot password?" SHALL, for a home-network browser, write a one-time 8-digit PIN valid for 15 minutes to `password-reset-pin.txt` in the data folder (owner-only), log the file and its expiry without the PIN, and ask for the PIN and a new password. No new PIN SHALL be made while one is live or within a minute after one ends. Other browsers SHALL be told to reset from the home network or run `cinevault-server passwd`.
+
+#### Scenario: Reset from the home network
+- **WHEN** a browser at 192.168.1.30 asks for a reset, the person reads the PIN from `password-reset-pin.txt` and enters it with a new password
+- **THEN** the password changes, every other browser is signed out, the file is gone and the browser is signed in
+
+#### Scenario: Wrong PIN five times
+- **WHEN** a wrong PIN is entered five times
+- **THEN** the PIN is void, its file is deleted, and the right PIN is refused afterwards
+
+#### Scenario: Expired PIN
+- **WHEN** the right PIN is entered 16 minutes after it was created
+- **THEN** it is refused, the file is deleted and the password is unchanged
+
+#### Scenario: Asking twice
+- **WHEN** a reset is asked for twice within a minute
+- **THEN** the second answer points at the same file and the PIN does not change
+
+#### Scenario: Public address
+- **WHEN** a browser at a public address asks for a reset
+- **THEN** it is refused with the home-network sentence and no file is written
+
+#### Scenario: Spoofed forwarded address
+- **WHEN** a request from a public peer that is not a trusted proxy carries `X-Forwarded-For: 192.168.1.30`
+- **THEN** the header is ignored and the reset is refused
+
+#### Scenario: Not in the log
+- **WHEN** a PIN is created
+- **THEN** the log names the file and its expiry and does not contain the PIN
+
+### Requirement: Using a reset PIN
+The server SHALL compare a reset PIN in constant time. Five wrong PINs SHALL void it and delete its file. A right PIN with a new password that is too short or does not match SHALL be refused without spending the PIN. A successful reset SHALL set the password, end every other session and stream, delete the file and sign the browser in. An expired PIN SHALL be refused and its file deleted. `cinevault-server passwd` SHALL keep working as the administrator's fallback.
+
+#### Scenario: Reset completes
+- **WHEN** the right PIN and a matching 12-character password are sent
+- **THEN** the password changes, the old sessions end, the file is deleted and the browser is signed in
+
+#### Scenario: PIN used twice
+- **WHEN** the PIN that completed a reset is sent again
+- **THEN** it is refused and the password is unchanged
+
+#### Scenario: Short new password
+- **WHEN** the right PIN is sent with a new password of 8 characters
+- **THEN** the reset is refused for the password and the same PIN still works with a valid password
+
+### Requirement: Password recovery in the desktop app
+On the sign-in page served by the desktop app's Browser access, "Forgot password?" SHALL say "Change it in CineVault's Settings on <computer name>.", and the reset requests SHALL be refused without creating a PIN.
+
+#### Scenario: Forgot password in the app
+- **WHEN** "Forgot password?" is used on the sign-in page served by the desktop app on a computer named STUDY-PC
+- **THEN** the page says "Change it in CineVault's Settings on STUDY-PC." and no PIN file is written
+
+### Requirement: Forwarded requests are not from the home network
+A request that carries a forwarding header (`Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP`, `CF-Connecting-IP` or `True-Client-IP`) from a peer that is not a trusted proxy SHALL be judged outside the home network by the welcome pages, the PIN reset, the sign-in ceiling and Browser access's home-network option. The first such request in a run SHALL be logged as a warning that names `CINEVAULT_WEB_TRUST_PROXY`.
+
+#### Scenario: Reset through an untrusted proxy
+- **WHEN** a request from `127.0.0.1` carries `X-Real-IP: 203.0.113.7` and asks for a password reset, and no trusted proxy is set
+- **THEN** it is refused with the home-network sentence and no PIN file is written
+
+#### Scenario: Trusted proxy
+- **WHEN** `CINEVAULT_WEB_TRUST_PROXY=127.0.0.1` is set and a request from `127.0.0.1` carries `X-Forwarded-For: 192.168.1.30`
+- **THEN** the request is judged from the home network
+
+#### Scenario: One warning
+- **WHEN** three requests with `X-Forwarded-For` arrive from an untrusted peer
+- **THEN** the log holds one warning naming `CINEVAULT_WEB_TRUST_PROXY`
+
+#### Scenario: Port mapping without headers
+- **WHEN** a request without forwarding headers arrives from the container bridge address `172.17.0.1`
+- **THEN** it is judged from the home network
+
+### Requirement: Host settings refused from a browser
+A browser SHALL NOT change the update channel, the update signing key, a tool's path or the video player settings; `set_setting` for one of them SHALL be refused with "This setting is changed on the computer that runs CineVault." and change nothing, and resetting settings from a browser SHALL leave them as they are. The custom trash folder and the collection data folder SHALL be accepted from a browser only when empty or inside the server's folder roots.
+
+#### Scenario: Update channel from a browser
+- **WHEN** a signed-in browser sets `general.update-channel` to `https://updates.example.net/manifest.json`
+- **THEN** the request is refused with the sentence and the desktop keeps reading its built-in channel
+
+#### Scenario: Player command from a browser
+- **WHEN** a signed-in browser sets `player.custom-command`
+- **THEN** the request is refused and Play in the desktop app starts the player chosen at the computer
+
+#### Scenario: Trash folder outside the roots
+- **WHEN** a browser sets the custom trash folder to `/etc/cron.d` on a server whose roots are `/media` and the data folder
+- **THEN** the request is refused and deleted files keep going where they went
+
+#### Scenario: Trash folder inside the roots
+- **WHEN** a browser sets the custom trash folder to `/media/movies/.trash`
+- **THEN** the setting is saved
+
+#### Scenario: Reset to defaults from a browser
+- **WHEN** a browser resets the General settings, including a custom update channel set at the computer
+- **THEN** the other General settings return to their defaults and the update channel is unchanged
+
+### Requirement: No framing
+Every response of the server and of the desktop app's Browser access SHALL carry `X-Frame-Options: DENY` and a `Content-Security-Policy` that includes `frame-ancestors 'none'`, so no other site can show a CineVault page in a frame.
+
+#### Scenario: Page in a frame
+- **WHEN** another site embeds the server's address in a frame
+- **THEN** the browser refuses to show it, because the response forbids framing
+
+#### Scenario: Media response
+- **WHEN** a media file is requested
+- **THEN** its one `Content-Security-Policy` keeps the sandbox and adds `frame-ancestors 'none'`
+
+### Requirement: Sessions kept across restarts
+Sessions SHALL be kept in `server-sessions.json` in the data folder, owner-only and written atomically, holding a hash of each session id and never the id itself, so a restart of the server or of the desktop app keeps browsers signed in within the usual lifetimes. Signing out, "Sign out every session", a password change by any means, and turning Browser access off or changing its port SHALL end the sessions they end today.
+
+#### Scenario: Server restart
+- **WHEN** the server is restarted while a browser is signed in
+- **THEN** the browser's next request is served without signing in again
+
+#### Scenario: Desktop app update
+- **WHEN** the desktop app quits to install an update while Browser access is on and a phone is signed in
+- **THEN** after the app starts again the phone is still signed in
+
+#### Scenario: Password changed on the command line
+- **WHEN** `cinevault-server passwd` sets a new password while the server is stopped and the server is started again
+- **THEN** every earlier session is answered as signed out
+
+#### Scenario: Browser access switched off
+- **WHEN** Browser access is turned off and on again
+- **THEN** every browser has to sign in again
+
+#### Scenario: Damaged sessions file
+- **WHEN** `server-sessions.json` cannot be read at start
+- **THEN** the server starts with no sessions, keeps the unreadable file aside and logs why
+
+#### Scenario: No session id on disk
+- **WHEN** `server-sessions.json` is read after a sign-in
+- **THEN** it does not contain the cookie value of any session and only its owner can read it
+
+### Requirement: Installable from a browser
+The browser version SHALL be installable as an app (Add to Home Screen on iOS, Install app where a browser offers it). Its manifest SHALL name CineVault, start at `/`, open full screen, use the dark window ground as its colours and list 192 and 512 pixel icons, one maskable. The browser shell and the server's own pages SHALL link the manifest and icons and carry the iOS full-screen and theme-colour tags. The desktop app window SHALL NOT link the manifest.
+
+#### Scenario: Add to Home Screen on iOS
+- **WHEN** a person opens the sign-in page in Safari on an iPhone and chooses Share, then Add to Home Screen
+- **THEN** the suggested name is "CineVault" with the CineVault icon, and opening it from the home screen shows CineVault full screen without the Safari bars
+
+#### Scenario: Every server page
+- **WHEN** the sign-in, welcome or "Finish setup from your home network" page is opened
+- **THEN** its head links `/manifest.webmanifest` and `/apple-touch-icon.png`
+
+#### Scenario: Desktop window
+- **WHEN** the desktop app opens its window
+- **THEN** its page links no manifest
+
+### Requirement: Install files without a session
+The manifest, the home-screen icon, the manifest icons and the favicons SHALL be served without a session, the manifest as `application/manifest+json`, with a cache of at most one day. Every other interface file outside `assets/` SHALL still need a session.
+
+#### Scenario: Manifest without a session
+- **WHEN** a browser that is not signed in asks for `/manifest.webmanifest` or `/icon-512.png`
+- **THEN** the server answers with the file and `Cache-Control: public, max-age=86400`
+
+#### Scenario: Other files stay private
+- **WHEN** a browser that is not signed in asks for any other interface file outside `assets/`
+- **THEN** it is sent to sign in, as before
+
+### Requirement: Faster start over HTTPS
+When the browser version is reached over HTTPS, it SHALL register a service worker that keeps the hashed build files for a faster start and shows "Can't reach CineVault" with Try again when a page can't be loaded because the server does not answer. The worker SHALL NOT store pages, commands, streams, images or media. Over plain HTTP and in the desktop app no service worker SHALL be registered. The worker script SHALL be served without a session and checked for a new version on every start.
+
+#### Scenario: Server away
+- **WHEN** an installed app reached over HTTPS opens while the server does not answer
+- **THEN** it shows "Can't reach CineVault" with Try again instead of the browser's error page
+
+#### Scenario: Plain HTTP
+- **WHEN** the browser version is opened at `http://192.168.1.20:8787`
+- **THEN** no service worker is registered and it works as before
+
+#### Scenario: Nothing private stored
+- **WHEN** a signed-in person browses the library, opens images and plays a file over HTTPS
+- **THEN** the worker's storage holds only build files under `/assets/` and the offline page

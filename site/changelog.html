@@ -1,0 +1,365 @@
+<!doctype html>
+<!-- Generated from CHANGELOG.md by scripts/site-changelog.mjs (bun run site:changelog). Do not edit by hand. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CineVault changelog</title>
+<meta name="description" content="What changed in each version of CineVault, from 1.8.0 on, in plain words.">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f2f1ee" media="(prefers-color-scheme: light)">
+<link rel="icon" href="img/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="img/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="img/apple-touch-icon.png">
+<link rel="canonical" href="https://imtheyoyo.github.io/CineVault-FR/changelog.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="CineVault">
+<meta property="og:title" content="CineVault changelog">
+<meta property="og:description" content="What changed in each version of CineVault, from 1.8.0 on, in plain words.">
+<meta property="og:url" content="https://imtheyoyo.github.io/CineVault-FR/changelog.html">
+<meta property="og:image" content="https://imtheyoyo.github.io/CineVault-FR/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,400..700&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="bar">
+  <div class="wrap bar-in">
+    <a class="brand" href="./" aria-label="CineVault home">
+      <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><path d="M35.743 6.59A21 21 0 1 0 35.743 41.41A3 3 0 0 0 32.388 36.436A15 15 0 1 1 32.388 11.564A3 3 0 0 0 35.743 6.59Z" fill="currentColor"/><path d="M28.5 15H37.5A1.5 1.5 0 0 1 39 16.5V31.5A1.5 1.5 0 0 1 37.5 33H28.5A1.5 1.5 0 0 1 27 31.5V16.5A1.5 1.5 0 0 1 28.5 15Z" class="mark-frame"/></svg>
+      <span>CineVault</span>
+    </a>
+    <nav class="bar-nav" aria-label="Page">
+      <a href="./#flow">How it works</a>
+      <a href="./#features">Features</a>
+      <a href="./#download">Download</a>
+      <a href="changelog.html" aria-current="page">Changelog</a>
+      <a href="https://github.com/imtheyoyo/CineVault-FR/releases">Releases</a>
+    </nav>
+    <a class="btn btn-sm" href="./#download">Download</a>
+  </div>
+</header>
+
+<main id="main">
+  <div class="wrap log">
+    <header class="log-head">
+      <p class="kicker">Changelog</p>
+      <h1>What's new in CineVault</h1>
+      <p class="section-lede">What changed in each version, newest first.</p>
+    </header>
+    <article class="log-entry" id="v1.8.0">
+      <div class="log-meta"><h2>1.8.0</h2><time datetime="2026-11-21">21 November 2026</time></div>
+      <div class="log-body">
+<h3>Added</h3>
+<ul>
+<li>French interface. Settings › General › Interface language offers Match system (the default), English and Français; Match system uses French on a French system. The app reloads when you change it.</li>
+<li>Settings › Naming: Create a folder for loose files when scraping (on by default). When you Scrape a movie whose file sits loose, directly in a library folder or in a folder shared with other movies, CineVault first makes the movie's own folder (named by your Movie folder template), moves the file and its subtitles into it, and only then writes the NFO and artwork there, so they no longer land among other files. The file keeps its name (Rename after Scrape still renames it afterwards if you turned it on), and History can undo the move. A movie that already has its own folder is left as it is. If the folder cannot be made (a file in use, a folder that belongs to another title), the Scrape still works, the NFO and artwork are written next to the file as before, and Activity says why. Metadata only keeps the file where it is.</li>
+<li>The Scrape page and the match picker now tell you before you scrape: for a loose movie, &quot;What will change&quot; says that a folder of its own is created and the file moved into it first, then the NFO and artwork written there, instead of saying the folder stays as is until you Rename.</li>
+<li>Undoing a Scrape that gave a movie its own folder now takes the move back too, from the &quot;Scraped&quot; toast and from the Scrape's entry in History: the video and its subtitles return to where they were, the move's own History entry reads Undone, the NFO and artwork the Scrape wrote go to the Recycle Bin (or Trash), and the new folder is removed once it is empty. Nothing is ever deleted: if you renamed or moved the files in the meantime, nothing moves, Activity tells you why, and the move stays in History to undo from there.</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Updates and links now point to imtheyoyo/CineVault-FR; the update channel is signed with a new key.</li>
+</ul>
+      </div>
+    </article>
+    <article class="log-entry" id="v1.7.0">
+      <div class="log-meta"><h2>1.7.0</h2><time datetime="2026-11-12">12 November 2026</time></div>
+      <div class="log-body">
+<h3>Added</h3>
+<ul>
+<li>A title whose files are missing now has a &quot;Remove from library (keep files)&quot; button right in the warning on its page (movies and TV shows), with a line saying why the title is kept: the drive may be offline or the files only moved. It is not shown when the library folder is just offline, since that title comes back by itself. In the Library's &quot;Missing files or offline&quot; list, the selection bar has a &quot;Remove from library&quot; button, so you can clear many titles at once.</li>
+<li>Settings › Naming: Artwork file names. Pick a style (movie name in front, plain names, both, or Jellyfin), or Custom to choose the names of each artwork type yourself: poster, fanart, logo, landscape, disc art and the others, for movies and for shows, seasons and episodes. A type can have more than one name, such as <code>poster.jpg</code> and <code>folder.jpg</code>, so two media centres can read the same folder, and each row shows the files it gives for an example movie. In a folder that holds several movies the names with the movie name in front are always used. Rename moves the artwork you already have to the new names (with Undo), and old names go to the trash folder.</li>
+<li>A new &quot;Needs fixing&quot; chip in the Library's filter row (movies and TV shows) finds the titles that still miss something, so you no longer open them one by one. Tick Not scraped, No poster, No fan art, No clear logo, No plot or No title, each with the number of titles it would list, and the list shows the titles missing all that you ticked. It combines with the other filters and the search. Press Ctrl+A and use Scrape or Artwork on the selection bar to fix them in one go. When nothing is missing the list says &quot;Nothing to fix here&quot;. A TV show counts by its own artwork, not its episodes'.</li>
+<li>Original or localized title, title by title. A movie or TV show whose original title differs from its title in your metadata language can now use either: choose &quot;Title to use: Localized / Original&quot; on its Edit details page, or select several titles and pick &quot;Use original title&quot; or &quot;Use localized title&quot; under More (also in the right-click menu), with Undo. The library, the title page, <code>${title}</code> in the file and folder names and the NFO all follow, and the other title is kept, so switching back is exact. Titles whose names change show Rename pending; nothing is renamed until you run Rename. A new Scrape keeps the choice.</li>
+<li>Settings › Providers: Keep the original title. List the original languages whose movies and shows should keep their original title, such as French and Spanish; a title in one of them uses its original title from its first Scrape. &quot;Use for titles I have&quot; switches the matching titles already in your library at once, with Undo.</li>
+<li>Settings › Naming has {OriginalTitle} (and {ShowOriginalTitle} for episodes) among the token buttons, with a line that explains it: {Title} follows each title's choice, {OriginalTitle} is always the original title.</li>
+<li>Scan one place instead of every drive. Each library folder on the Drives page and in Settings › Library folders has a &quot;Scan this folder&quot; button, and a movie or TV show page has &quot;Scan again&quot; in its ⋯ menu and in the warning about missing files. Scan again reads only that title's folder (new or changed files, NFO, artwork and the video details of new files) and notices that its files are gone or back; no other title is touched. &quot;Scan folders now&quot; in the Library still scans everything.</li>
+<li>A rename now shows its progress in the sidebar (&quot;Renaming 3 of 12&quot;) and says when it is done with &quot;Renamed 12 titles&quot; and Undo, even if you left the Rename page. Titles that could not be renamed are listed in Activity › Needs attention with the reason and &quot;Open in Rename&quot; to try them again, and the toast says &quot;Renamed 10 of 12 titles; 2 need attention&quot; with a link to Activity.</li>
+<li>Activity shows the work that is running at its top (&quot;Running now&quot;), with the same progress and Pause and Cancel as the sidebar.</li>
+<li>Settings › Naming: Rename after Scrape (off unless you turn it on). A movie or show is renamed by itself once its Scrape and artwork are written, when its new names fit without a conflict. Titles scraped together are renamed together, and a toast says &quot;Renamed 12 titles after Scrape&quot; with Undo wherever you are. Titles that cannot be renamed yet, such as a name taken by another title, stay as they are and wait in Activity with the reason. Metadata only still wins.</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Scan progress counts titles, not library folders, so it no longer sits at &quot;0 of 8&quot; for minutes. It first says &quot;Finding titles… 312 found&quot; with the folder it is reading, then &quot;Scanning 312 of 707 titles&quot; with the title it is reading, and once it has timed enough titles, about how long is left. A scan also checks only the files of the titles it reads, which makes scans of large libraries on network shares quicker.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Rename: with two names for one artwork type, the second copy is now part of the title, so the next Rename no longer reports a conflict in the title's own folder or copies the same image again.</li>
+</ul>
+      </div>
+    </article>
+    <article class="log-entry" id="v1.6.2">
+      <div class="log-meta"><h2>1.6.2</h2><time datetime="2026-11-04">4 November 2026</time></div>
+      <div class="log-body">
+<h3>Fixed</h3>
+<ul>
+<li>Scrape writes the provider's keywords as tags again, so newly added movies and shows get tags in the library and in their NFOs like the titles you already had. They are added to the tags a title already has, which stay. Tags is a new choice under the fields to scrape in Settings › Providers, on by default; clear it to leave tags alone. To fill in the tags of titles scraped before this version, Scrape them again.</li>
+</ul>
+      </div>
+    </article>
+    <article class="log-entry" id="v1.6.1">
+      <div class="log-meta"><h2>1.6.1</h2><time datetime="2026-11-04">4 November 2026</time></div>
+      <div class="log-body">
+<h3>Added</h3>
+<ul>
+<li>Torrents: a Filter results field at the right of the chips narrows a title's releases by words in their names, in any order (<code>remux atmos</code>); start a word with - to leave it out (<code>-x265</code>). The chip counts follow it, and Esc clears it.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>A movie kept as a Blu-ray or DVD folder (<code>BDMV</code>, <code>VIDEO_TS</code>) showed a size of 0 B on its page, in the library's size column and filters, and in the <code>${videoFilesize}</code> naming token. It now shows the size of the whole disc folder after the next Scan.</li>
+</ul>
+      </div>
+    </article>
+    <article class="log-entry" id="v1.6.0">
+      <div class="log-meta"><h2>1.6.0</h2><time datetime="2026-11-03">3 November 2026</time></div>
+      <div class="log-body">
+<h3>Added</h3>
+<ul>
+<li>Torrents: the Wishlist's limits take a smallest size as well as a largest, so the size works as a range (for example 20–60 GB) and a check skips small re-encodes that pass the resolution.</li>
+<li>Activity: History is now called Activity. While something needs you, its top shows Needs attention: a move or rename that did not finish, with where it was going, how far it got (&quot;8 of 10 files copied, 15 GB of 86 GB&quot;), why it stopped and Resume and Roll back, and the warnings and errors from background work (a rejected API key, artwork that could not be saved…), each with its fix and Dismiss. History stays below it. The Activity icon in the sidebar shows a dot while something is there.</li>
+<li>Moves: a move cut short because CineVault was closed carries on by itself the next time CineVault opens, from where it stopped, when both drives are there. A toast says so, and the progress with Pause and Cancel shows in the sidebar and in Activity. A move that stopped on an error, such as a full or unplugged drive, waits in Activity for you.</li>
+<li>Move to: for a title held by a move that did not finish, the menu says how far that move got and offers Resume that move, Roll it back and Open in Activity.</li>
+<li>Naming: three new tokens keep what the name of a download said about the release, even after earlier renames: {Quality} (such as Bluray-1080p or WEBDL-2160p), {ReleaseTags} (the release part of the name as it was, such as 1080p.BluRay.x264) and {ReleaseGroup} (the group after the last dash). They are read from the name the file had when CineVault first found it, and stay empty when that name doesn't say it; CineVault never guesses a group.</li>
+<li>Naming: a Release info style, in Settings › Naming and in the first-run setup, names files like <code>Example Movie (2020) [1080p.WEB-DL.x264]-GROUP</code>, so a download manager that reads the same folders still recognises the release. A file without release information gets the Clean name.</li>
+<li>Settings › Naming: a Metadata only switch. While it is on, CineVault never renames or moves your files and folders, from the app, a browser, the command line or an automation: Rename and Move to… are hidden. Scan, Scrape, NFO and artwork files, Delete and Undo keep working.</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Torrents: a title you already have no longer goes straight to Done on the Wishlist. Its entry says what you have (&quot;You already have this: 1080p · WEB-DL&quot;, linking to the title) and keeps being checked; it's done only when a copy that meets what you asked for arrives after you added or edited it. A done entry offers Keep looking.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Moves: &quot;Resume it or roll it back in Activity first&quot; pointed to a page that did not exist, so a stopped move could not be resolved and its title could not be moved again. A stopped move now also shows a toast with Open Activity.</li>
+<li>Settings: clicking a section in the index, especially the last one, no longer scrolls the whole window and pushes the index off screen or leaves empty space below the last card. Only the settings scroll, and only as far as they go.</li>
+<li>Moves to another drive: resuming a move that stopped in the middle of a large file (CineVault was closed, or the drive filled up) now carries on from where the file stopped instead of copying it again from the start. What was already copied is checked against the original first, and the whole file is still checked once it is done.</li>
+<li>Move to: a title waiting on a move that did not finish now shows its size instead of &quot;0 B&quot;.</li>
+</ul>
+      </div>
+    </article>
+    <article class="log-entry" id="v1.5.0">
+      <div class="log-meta"><h2>1.5.0</h2><time datetime="2026-11-03">3 November 2026</time></div>
+      <div class="log-body">
+<h3>Added</h3>
+<ul>
+<li>Browser mode: CineVault can be added to a phone's home screen (Safari › Share › Add to Home Screen on iPhone, Install app in Chrome on Android) and opens full screen with its own icon. You sign in once more inside the home-screen app.</li>
+<li>Browser mode on phones and tablets: below 1024px wide the sidebar opens as a drawer from the menu button at the top left, next to Back and the search, every page fits the width without scrolling sideways, buttons and menu items are bigger on touch screens, and a long press opens the menu that a right-click opens on a computer.</li>
+<li>Browser mode over HTTPS: CineVault starts faster from what it already downloaded, and says &quot;Can't reach CineVault&quot; with Try again when the server doesn't answer, instead of the browser's error page.</li>
+<li>Drives: a Refresh button next to &quot;Updated …&quot; reads every drive again at once, for example after copying files outside CineVault or plugging a drive in.</li>
+<li>Copies: the Movie page of a movie you have more than once shows a tab for each copy at the top of its Technical card (&quot;2160p DV&quot;, &quot;1080p&quot;), the best one marked. A tab switches the page to that copy: its file, NFO, Rename history, Play and Move. The Copies row at the end of the card offers Keep only this one, Delete this copy and Compare. It replaces the &quot;You have 2 copies · Compare&quot; line.</li>
+<li>Torrents: when you search a title you already have, a &quot;You have this&quot; card shows what you have: each copy of a movie (resolution, HDR, codec, audio, source, edition, size), or the seasons of a show and the episodes you're missing (&quot;You have S01–S02 · missing S02E04–E10&quot;). It replaces the thin &quot;Yours:&quot; line. Search anyway folds it into one line.</li>
+<li>Torrents: the Better, Same as yours and Worse tag on a release now says why when you point at it (&quot;Better: 2160p Dolby Vision vs your 1080p SDR&quot;), and clicking it opens Compare with yours: your copy and the release side by side, the differences marked, ending in a plain verdict like &quot;Better picture, better audio, 2.5× the size&quot;. The Latest releases details panel shows the same comparison for a movie you have.</li>
+<li>Torrents: an &quot;Only better than mine&quot; chip hides the releases that are no better than your copy. For a show, releases are tagged Fills a gap, In your library or Better, and a &quot;Fills a gap&quot; chip lists only the ones with episodes you're missing.</li>
+<li>Movie and show pages: the ⋯ menu has Find a better copy (movies) and Find missing episodes (shows), which open Torrents with the title picked and the matching chip on.</li>
+<li>Torrents: a Wishlist, next to Search at the top of the Torrents page. Add a movie, a season, an episode or &quot;the next new episode&quot; of a show with the kind of release you want: the lowest resolution, the sources (Remux, Blu-ray, WEB-DL, WEBRip), HDR only, a largest size and the fewest seeders. Add titles with Add on the Wishlist, from a torrent search, from a film of a collection you don't have, or from the ⋯ menu of a Movie or Show page.</li>
+<li>Torrents: CineVault checks the Wishlist when it opens and every hour while it stays open, each title at most every 6 hours, or at once with Check now. New releases that match show as a count on Torrents in the sidebar and as a toast, each with Send to torrent app and Dismiss. Nothing is sent without you. A title is marked done once your library has a copy that meets what you asked for.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Torrents: Compare with yours from a release's right-click menu sometimes closed again at once.</li>
+<li>Drives: clicking a drive in the sidebar now opens the Drives page on that drive, also when the page is already open, and the sidebar shows which drive is chosen.</li>
+<li>Rename no longer gives a downloaded info file (a plain-text <code>.nfo</code> about the video, named like it) the movie's NFO name. Before, CineVault could then never write its own NFO for that movie, and when the movie already had one, the info file could push it into the trash. Now a rename sets the info file aside with the other leftovers (Undo brings it back), so only CineVault's NFO stays with the title.</li>
+</ul>
+      </div>
+    </article>
+    <article class="log-entry" id="v1.4.0">
+      <div class="log-meta"><h2>1.4.0</h2><time datetime="2026-11-02">2 November 2026</time></div>
+      <div class="log-body">
+<h3>Added</h3>
+<ul>
+<li>Network shares: add a library folder from a NAS with its user name and password (Settings › Library folders › Network share…). CineVault keeps the password in your system's credential store, reconnects at start, and says why a share is offline (&quot;Wrong password&quot;, &quot;Server not reachable&quot;) with Connect… to fix it. It never disconnects a connection you made yourself. The server installers set shares up for browser mode.</li>
+<li>Copies: if you have the same movie twice (say a 4K and a 1080p download), the Copies filter shows them, Compare puts them side by side, and Keep this one deletes the other the usual way. Keep both, and Rename gives each its own name, like &quot;- 2160p&quot; and &quot;- 1080p&quot;. When two copies may be one file reached two ways (a drive and its network share), Compare does not offer to delete either.</li>
+<li>CineVault keeps a checked backup of your library every day (the last seven), so History and Undo can be brought back, and tells you if backups keep failing.</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>One Delete everywhere. It follows Settings › Deleted files; the separate Delete permanently item is gone, Shift+Delete does the same as Delete, and a permanent delete asks Yes or No instead of making you type DELETE.</li>
+<li>The Delete confirmation shows each title's folder under its name, so two titles with the same name can be told apart.</li>
+<li>A library folder that is already in your library under another path (a network share, a mapped drive or a link) can no longer be added a second time.</li>
+<li>IMDb is no longer read from its web site, which kept asking for a human check. IMDb IDs come with every TMDB match, IMDb ratings from IMDb's own ratings file, and with an OMDb key OMDb adds IMDb data to Scrape.</li>
+<li>Browsers stay signed in when the server restarts or the desktop app updates. Switching Browser access off, changing its port, signing out or choosing a new password still signs them out.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Linux and browser mode: titles on a network share mounted at a folder such as <code>/media/nas</code>, or in a Docker install, no longer show as missing. They are available again, and Rename and Move work on them.</li>
+<li>Scrape: a title whose name already ends in its year, such as <code>Example Movie (2003)</code>, is no longer searched with the year twice, which found nothing.</li>
+<li>Rename to another drive: the copy is written to the disk before the original is removed, so a power cut during a rename can no longer lose the file.</li>
+<li>Rename to another drive: a folder that holds a link to another folder is no longer moved, so files outside the title can't be touched; move such a title by hand.</li>
+<li>Linux installer: updating with the server tarball no longer ends with a list of &quot;Permission denied&quot; messages about its temporary folder.</li>
+<li>Windows Docker installer: Update, Change folders and Remove show the right data folder again.</li>
+<li>Docker: the container starts faster with a large library and keeps the groups your NAS folders need.</li>
+</ul>
+<h3>Security</h3>
+<ul>
+<li>A browser can no longer change the update channel, the update signing key, a tool's path or the video player. These are changed at the computer that runs CineVault; on a server, a tool's path goes in <code>settings.json</code> while CineVault is stopped. The custom trash folder and the collection folder must be inside the folders the server may browse.</li>
+<li>A request that comes through a reverse proxy or tunnel is treated as outside your home network unless the proxy is listed in <code>CINEVAULT_WEB_TRUST_PROXY</code>, so a stranger cannot reach the welcome page or a password reset through it, and &quot;Only devices on my home network&quot; refuses it.</li>
+<li>A flood of wrong passwords from the internet no longer stops you from signing in from your home network, and checking passwords no longer slows the server for everyone else.</li>
+<li>No other website can show CineVault inside a frame.</li>
+</ul>
+      </div>
+    </article>
+    <article class="log-entry" id="v1.3.0">
+      <div class="log-meta"><h2>1.3.0</h2><time datetime="2026-10-31">31 October 2026</time></div>
+      <div class="log-body">
+<h3>Added</h3>
+<ul>
+<li>Browser mode installs with one command: on Linux it installs the server package and starts it as a service, on Windows and macOS it sets CineVault up in Docker Desktop. Running the same command again updates CineVault, changes its folders or removes it. There is also an Unraid template and a simpler Docker Compose file.</li>
+<li>Torrents: the page now opens with the latest releases from your torrent sources, in the same list as a search, filling in as each source answers. Choose All, Movies or TV, sort by newest, seeders, size or quality, filter by resolution, and camera and TS copies are hidden unless you switch &quot;Hide CAM and TS&quot; off. Scroll down for more; a source that has nothing more says so. Type a title to search as before, and clear the field to come back to the list.</li>
+<li>Torrents: releases of titles you already have say &quot;In your library&quot;, or &quot;Better than your copy&quot; when they beat the movie you hold. This is worked out from your library alone.</li>
+<li>Torrents: click a release (or its Details button) and a side panel slides in and looks the title up on TMDB: poster, plot, rating and links to TMDB, IMDb, Letterboxd and Trakt. If the match looks wrong it says so and lets you pick another title. It also lists the title's other releases and can search all of them. Without a TMDB key it shows what the release name says.</li>
+<li>Browser access: turn it on in Settings › Browser access and open your library from a phone, a TV or another computer on your home network, with no Docker and no second install. The CineVault you already run serves it, so the window and the browser see the same library at the same time. The section shows the address to open with a Copy button and a QR code, lets you choose the port, and lists the signed-in browsers with Sign out for each or for all.</li>
+<li>The password for Browser access is created and changed in Settings, right at the computer. Turning Browser access off closes the port and signs every browser out.</li>
+<li>Only devices on your home network can reach Browser access unless you turn that off.</li>
+<li>Two options for Browser access: keep CineVault running in the tray when the window is closed, and start CineVault when you sign in.</li>
+<li>Server: &quot;Forgot the password?&quot; on the sign-in page writes a one-time PIN to <code>password-reset-pin.txt</code> in the data folder. Enter it with a new password from a browser on your home network; it works once, for 15 minutes, and signs every other browser out.</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Server: the first-run welcome no longer closes after 30 minutes. It stays until a password exists, but only browsers on the same computer or the home network can use it.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>A password set with <code>cinevault-server passwd</code> as root (with sudo, or <code>docker exec</code> without <code>-u</code>) now works right away instead of only after a restart.</li>
+<li>The server packages and tarball are attached to every release again; 1.2.0 was missing them at first.</li>
+<li>Removing the server <code>.deb</code> no longer takes an empty <code>/usr/local/bin</code> folder with it.</li>
+<li>Torrents: the &quot;Send to torrent app&quot; button at the end of each row was cut off (&quot;Send to t…&quot;). It now reads &quot;Send&quot; and always fits; its tooltip still says what it does.</li>
+<li>The Move to menu is clean and dependable again. Each drive is a row of its own with its free space, the folder's path shortened in the middle (hover it for the whole path) and the free space after the move. A drive that cannot take the titles now says why on its row, such as &quot;Not enough space: needs 71.4 GB, 1.02 GB free.&quot;, instead of only looking greyed out, and the menu no longer shows stray scrollbars.</li>
+<li>A click outside the Move to menu now closes it and does what you clicked, so selecting a title no longer takes two clicks. Pressing &quot;Move to…&quot; again closes the menu, Esc closes it and keeps your selection, and the menu opens above the selection bar without covering it, also in a small window.</li>
+<li>The Move to menu shows placeholder rows while it measures free space, says when there is no other folder to move to with a way to Settings › Library folders, and works fully from the keyboard.</li>
+</ul>
+      </div>
+    </article>
+    <article class="log-entry" id="v1.2.0">
+      <div class="log-meta"><h2>1.2.0</h2><time datetime="2026-10-30">30 October 2026</time></div>
+      <div class="log-body">
+<h3>Added</h3>
+<ul>
+<li>Browser mode (beta): CineVault can run on a home server next to the media files and be used from any browser: sign in, browse the library and the title pages, scan, scrape and fix a match, choose artwork, rename with the preview and undo, and read the History. The server is a Linux program with no desktop stack, shipped as a container image, a <code>.deb</code>/<code>.rpm</code> and a tarball; the <code>cinevault</code> command line is included.</li>
+<li>One password for the server, created in the first-run welcome, with a 30-day session, &quot;sign out every session&quot; and a <code>cinevault-server passwd</code> recovery command.</li>
+<li>The server keeps provider keys in an encrypted <code>secrets.enc</code> and takes the master key from a Docker secret or a systemd credential. The desktop app keeps using the operating-system credential store.</li>
+<li>The server and the desktop app share one library safely: the server holds a <code>library-owner.json</code> lock, the desktop app refuses that folder, and the command line exits with code 2 instead of writing behind the server's back.</li>
+<li>Browser playback of the server's files with seeking; the desktop player choice stays in the desktop app.</li>
+<li>A Server section in Settings with the address, version, session count, key state, password change and &quot;sign out every other session&quot;.</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Deleting a title that shares its folder with other titles, or sits directly in a library folder, now also removes the subtitles, posters, NFO files, trailers and other files named after it, even ones added since the last Scan. Deleting an episode does the same for its files. Files of the other titles stay, and Undo brings them back.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Ultra HD Blu-ray folders and images with Dolby Vision now show Dolby Vision (profile 7) next to HDR10. The disc's second video layer was taken for a plain HDR10 stream, so only HDR10 was shown.</li>
+<li>Blu-ray folders and images now show the language of every audio and subtitle track, read from the disc's own track list.</li>
+<li>Dolby Digital Plus tracks that were shown as AC3 (in Blu-ray files and some MKV files) are now called E-AC-3, with Atmos when they have it.</li>
+<li>DTS:X tracks with height speakers now show their real layout, such as 7.1, instead of 11.1.</li>
+<li>Interlaced videos stored as separate fields now show their frame rate (29.97 instead of 59.94).</li>
+<li>After the update, CineVault reads the media info of Blu-ray discs, disc images, Blu-ray files and the videos above once more, so they show the corrected details.</li>
+<li>Linux: the AppImage, .deb and .rpm now start on Ubuntu 22.04, Debian 12, Linux Mint 21 and other systems of that age. 1.1.0 was built on a newer system and needed a newer C library (glibc 2.38) than they have, so it closed right away.</li>
+</ul>
+      </div>
+    </article>
+    <article class="log-entry" id="v1.1.0">
+      <div class="log-meta"><h2>1.1.0</h2><time datetime="2026-10-28">28 October 2026</time></div>
+      <div class="log-body">
+<h3>Added</h3>
+<ul>
+<li>Spotlight search: type in the search box in the title bar and see matching titles at once, grouped, with your recent searches and &quot;See all results&quot;.</li>
+<li>Torrents: type a title and pick it from the suggestions before any release is searched. The picked title stays as a chip you can change.</li>
+<li>Library table: drag a column header to move it, drag its edge to resize it (double-click to fit), or use Move left and Move right in the header menu. Widths and order are remembered.</li>
+<li>A Stage column with clear New, Scraped and Renamed tags.</li>
+<li>Reload media info: re-read the video and audio details of the selected titles (or the whole list) from the toolbar, the right-click menu, the selection bar or the title's ⋯ menu.</li>
+<li>Choose the poster size in the grid toolbar. It is remembered.</li>
+<li>Look at an artwork picture large in the artwork picker: press the expand button, double-click or press Space. Click or Esc closes it.</li>
+<li>Change artwork is now a button in the title page header.</li>
+<li>Optional Fanart.tv and TheTVDB keys in Settings › Providers and in the first-run setup, and a &quot;needs a key&quot; link in search that opens them.</li>
+<li>Release notes of an available update, shown before you update, and a Release notes view with every version in Settings › Updates.</li>
+<li>&quot;What's new&quot; after an update: a short card with the changes of the version you just installed.</li>
+<li>CineVault for Linux, as a beta for 64-bit systems: an AppImage, a .deb package for Debian and Ubuntu and an .rpm package for Fedora. Deleted titles go to the system Trash of their own drive, API keys are kept in the system keyring (GNOME Keyring, KWallet or KeePassXC), and the AppImage updates itself from inside the app.</li>
+<li>CineVault is now open source under the Apache-2.0 licence. The code, the issue tracker and the releases are at github.com/imtheyoyo/CineVault-FR, and contributions are welcome (see CONTRIBUTING.md).</li>
+<li>Settings › Naming: a Style control at the top fills the movie folder, movie file and TV episode templates from the same styles as the first-run setup. Editing a template switches it to Custom, and choosing a style over your own templates asks first.</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Downloads, updates and the website moved to the project's own GitHub page. The app now looks for updates there first and uses the earlier releases page only when that cannot be reached. Installed copies update as before, and nothing needs to be done.</li>
+<li>Delete… is now the last item of a title's ⋯ menu, in red, after a divider.</li>
+<li>The date a title was added now comes from its video file's creation time, and titles that all got the date of the first scan are corrected once.</li>
+<li>Opening and closing an episode on a TV show page is smoother, and it stays instant when you have reduced motion on.</li>
+<li>The large artwork view now loads the full-size picture, so it is sharp: the small preview shows at once and the full picture fades in, with its real size under it.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Settings › Naming: the TV episode example is no longer empty, and every template field now has its token buttons (the TV one also has Channels).</li>
+<li>A video ratio wider than its frame (for example 2.39:1 in a 16:9 file) is now reported instead of being cut to the frame.</li>
+</ul>
+      </div>
+    </article>
+    <article class="log-entry" id="v1.0.1">
+      <div class="log-meta"><h2>1.0.1</h2><time datetime="2026-10-27">27 October 2026</time></div>
+      <div class="log-body">
+<h3>Added</h3>
+<ul>
+<li>Choose where deleted files go: the Recycle Bin, a trash folder on each file's own drive, a folder you pick, or nowhere (erased at once). Settings › Deleted files has the choice.</li>
+<li>Each drive's trash shows its size, with an Empty button. Emptying touches only CineVault's own folder, also inside a trash folder you chose.</li>
+<li>Show the exact HDR format (HDR10, HDR10+, Dolby Vision and so on) on the Technical card.</li>
+<li>A new landing page for CineVault 1.0.</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Moving titles between drives is faster, and each move is still verified before the original goes to the trash.</li>
+<li>Search finds titles whatever the punctuation, spacing or accents, and forgives small typos.</li>
+</ul>
+      </div>
+    </article>
+    <article class="log-entry" id="v1.0.0">
+      <div class="log-meta"><h2>1.0.0</h2><time datetime="2026-10-27">27 October 2026</time></div>
+      <div class="log-body">
+<p>CineVault 1.0 is a new design and a fresh start. It does not read the library of an earlier build; your old library is set aside on the first start and you set up again with a short four-step welcome.</p>
+<h3>Added</h3>
+<ul>
+<li>A new desktop design: a floating sidebar with counts, drives and progress, a title bar with centred search, light and dark themes, calm motion, and keyboard use everywhere (Esc, Delete, F2 and the arrow keys).</li>
+<li>The Library as a poster grid or a table on one selection, with Movies, TV shows and Collections, filters for stage, drive, quality and problems, and sorting on every column with a column chooser.</li>
+<li>One-page Movie and TV show pages with the plot, facts, cast, ratings, a Technical card, and seasons with episodes that open in place. Open a cast member's IMDb page from the cast row.</li>
+<li>Scrape: a queue with a search-only pass, candidates scored with their evidence, &quot;Accept all confident&quot;, and a page to pick another match for any title.</li>
+<li>Choose posters, backdrops and other artwork in an artwork picker, from the title header or for several titles at once, including collection artwork.</li>
+<li>Rename with word-by-word differences, conflicts shown in place and held-back titles, using templates with live examples in Settings › Naming.</li>
+<li>History: every rename, move, delete, artwork change and change of match is recorded, and you can undo the whole entry or a single title.</li>
+<li>Safe deletes: Delete sends titles to the Recycle Bin with Undo, and permanent delete needs you to type DELETE. History restores deleted titles without overwriting anything.</li>
+<li>Drives: a card per drive with its free space, the mix of quality, and when it was last seen. Move titles between drives with a Move to menu that shows the space before and after.</li>
+<li>Torrents: one search with a best match, resolution chips and a sortable table of releases.</li>
+<li>Settings in one page with sections for Providers, Naming, Folders, Torrent sources, Appearance and Updates. Changes apply at once.</li>
+<li>Update the app from within: CineVault checks, downloads and verifies the new version, and can install it when you close the app.</li>
+<li>Zoom the whole app with Ctrl/Cmd plus, minus and 0, or in Settings.</li>
+<li>Complete Kodi, Jellyfin and Emby NFO files, rewritten whenever a title changes.</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>One verb for each job everywhere: Scan, Scrape and Rename.</li>
+<li>The first scan of a fresh library reads local files only, so you see your titles at once.</li>
+</ul>
+      </div>
+    </article>
+    <article class="log-entry">
+      <div class="log-meta"><h2>Earlier versions</h2></div>
+      <div class="log-body">
+<p>Versions before 1.0 are described on the <a href="https://github.com/imtheyoyo/CineVault-FR/releases">releases page</a>.</p>
+      </div>
+    </article>
+  </div>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-in">
+    <div class="foot-brand">
+      <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><path d="M35.743 6.59A21 21 0 1 0 35.743 41.41A3 3 0 0 0 32.388 36.436A15 15 0 1 1 32.388 11.564A3 3 0 0 0 35.743 6.59Z" fill="currentColor"/><path d="M28.5 15H37.5A1.5 1.5 0 0 1 39 16.5V31.5A1.5 1.5 0 0 1 37.5 33H28.5A1.5 1.5 0 0 1 27 31.5V16.5A1.5 1.5 0 0 1 28.5 15Z" class="mark-frame"/></svg>
+      <span>CineVault</span>
+    </div>
+    <p class="credit">This product uses the TMDB API but is not endorsed or certified by TMDB. Ratings come from <a href="https://www.omdbapi.com/">OMDb</a> and <a href="https://mdblist.com/">MDBList</a> when you add their keys.</p>
+    <p class="foot-links"><a href="changelog.html">Changelog</a><a href="https://github.com/imtheyoyo/CineVault-FR/releases">Releases and release notes</a></p>
+  </div>
+</footer>
+</body>
+</html>

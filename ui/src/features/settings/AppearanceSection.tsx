@@ -1,0 +1,74 @@
+import { SegmentedControl } from "../../components/SegmentedControl";
+import { Select } from "../../components/Select";
+import { t } from "../../i18n/catalog";
+import { isServer } from "../../lib/transport";
+import type { MessageKey } from "../../i18n/catalog";
+import { detectPlatform } from "../shell/platform";
+import type { Platform } from "../shell/platform";
+import { FormRow, SettingsSection } from "./FormParts";
+import { useSetting, useSettingsStore } from "./settingsStore";
+import { ZOOM_STEPS, snapZoom } from "./zoom";
+
+type ThemeChoice = "light" | "dark" | "system";
+
+/** The label of the "follow the system" choice: each desktop names its own. */
+function systemThemeLabel(platform: Platform): MessageKey {
+  if (platform === "macos") return "settingsPage.appearance.matchMac";
+  if (platform === "linux") return "settingsPage.appearance.matchSystem";
+  return "settingsPage.appearance.match";
+}
+
+/**
+ * Settings, Appearance (spec `app-shell` "Themes"): Light, Dark or Match Windows (Match macOS,
+ * Match system on Linux). The change applies at once and the sidebar's Theme button shows the same
+ * choice. Size is the app zoom (80% to 150%); the zoom keys change the same setting.
+ */
+export function AppearanceSection() {
+  const theme = useSetting<ThemeChoice>("appearance.theme");
+  const zoom = snapZoom(useSetting<number>("appearance.zoom"));
+  const platform = detectPlatform();
+  const mac = platform === "macos";
+  const browser = isServer();
+  return (
+    <SettingsSection id="appearance" title={t("settingsPage.appearance.title")}>
+      <FormRow label={t("settingsPage.appearance.theme")}>
+        <SegmentedControl<ThemeChoice>
+          aria-label={t("settingsPage.appearance.theme")}
+          value={theme}
+          options={[
+            { value: "light", label: t("settingsPage.appearance.light") },
+            { value: "dark", label: t("settingsPage.appearance.dark") },
+            {
+              value: "system",
+              label: t(systemThemeLabel(platform)),
+            },
+          ]}
+          onChange={(value) => {
+            useSettingsStore.getState().set("appearance.theme", value);
+          }}
+        />
+      </FormRow>
+      {browser ? null : (
+        <FormRow
+          label={t("settingsPage.appearance.size")}
+          hint={t(
+            mac ? "settingsPage.appearance.size.hintMac" : "settingsPage.appearance.size.hint",
+          )}
+        >
+          <Select
+            className="w-[120px]"
+            aria-label={t("settingsPage.appearance.size")}
+            options={ZOOM_STEPS.map((step) => ({
+              value: String(step),
+              label: t("settingsPage.appearance.sizeOption", { percent: step }),
+            }))}
+            value={String(zoom)}
+            onValueChange={(value) => {
+              useSettingsStore.getState().set("appearance.zoom", Number(value));
+            }}
+          />
+        </FormRow>
+      )}
+    </SettingsSection>
+  );
+}

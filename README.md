@@ -1,0 +1,176 @@
+<div align="center">
+
+<img src=".github/assets/readme-banner.png" alt="CineVault: every title in its place" width="100%">
+
+# CineVault
+
+> CineVault FR is an independent fork of [CineVault](https://github.com/mustafayevt/CineVault) by mustafayevt (Apache-2.0) with a French interface and a folder step on Scrape.
+
+**A fast, free and open-source desktop library manager for your movies and TV shows, for Windows and Linux (beta).**
+
+[![Latest release](https://img.shields.io/github/v/release/imtheyoyo/CineVault-FR?style=flat-square&label=release)](https://github.com/imtheyoyo/CineVault-FR/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/imtheyoyo/CineVault-FR/ci.yml?style=flat-square&label=CI)](https://github.com/imtheyoyo/CineVault-FR/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-555?style=flat-square)](LICENSE)
+
+**[Download CineVault](https://imtheyoyo.github.io/CineVault-FR/)** · [All releases](https://github.com/imtheyoyo/CineVault-FR/releases) · [Changelog](CHANGELOG.md)
+
+</div>
+
+<p align="center">
+  <img src=".github/assets/library.png" alt="The Library in the dark theme: a poster grid with stage marks and a 2 copies badge on two movies, stage filters with counts, a Copies filter, and the sidebar with Scrape, Rename, Drives and Torrents" width="100%">
+</p>
+
+## What it does
+
+- **Scan → Scrape → Rename.** Every title moves through three stages: New, Scraped, Renamed. Scan finds the movies and shows in your folders, Scrape matches each one online, Rename tidies folders and files from a template.
+- **NFO and artwork for Kodi, Jellyfin and Emby.** Each Scrape writes complete NFO files and every artwork type (poster, fanart, logo, clear art, banner, disc art, thumb) in the formats your media centre reads.
+- **TV shows.** Show, season and episode pages with missing and unaired episodes, specials and season artwork.
+- **Ratings side by side.** TMDB and IMDb with no key, plus Rotten Tomatoes, Metacritic, Letterboxd and Trakt with your own free OMDb or MDBList key.
+- **Search as you type.** Type in the search box and matching titles appear at once, grouped, with your recent searches and See all results. Punctuation, spacing, accents and small typos do not matter; messy release names still match, with a confidence score for every candidate.
+- **Library your way.** A poster grid with a size you choose, or a table with a Stage column whose columns you can move and resize. The Needs fixing filter lists the titles with no poster, fan art, clear logo or plot, or not scraped yet, so you can fix them in one go.
+- **Copies of a movie.** If the same movie is in the library twice (a 4K and a 1080p download, say), the Copies filter lists them, the Movie page has a tab for each copy, Compare puts them side by side with the better value of each row marked, and Keep this one deletes the other the way Delete always does. Keep both leaves them alone, and Rename gives each its own name, such as `- 2160p` and `- 1080p`.
+- **HDR details.** The Technical card shows the exact HDR format (Dolby Vision profile, HDR10+, HDR10, HLG), audio and file details read from the file.
+- **Drives with safe moves.** Free space per drive and Move to another drive: copy, verify, and only then do the originals go to the Recycle Bin (the Trash on Linux). Scan this folder and Scan again read one library folder or one title instead of every drive, and a scan counts in titles with the time left.
+- **Deleted files handled your way.** Delete sends a title to the Recycle Bin or Trash, a trash folder on each drive or a trash folder you choose, and old trash can be emptied automatically. Choosing "Delete permanently" there makes Delete erase a title, after a Yes or No that lists what goes.
+- **Activity, History and Undo.** Renames, moves, deletes, artwork and match changes are listed in History on the Activity page, each with Undo. Anything that needs you, such as a move that did not finish or a rejected API key, waits above it under Needs attention with its fix.
+- **Collections.** A collection appears on its own once you own two or more films of the same set.
+- **Torrent search hand-off.** Pick a title from the suggestions, search its releases from inside the app, narrow them by words in their names (`remux atmos -x265`) and compare each with what you have, side by side; for a show, see which releases fill your missing episodes. CineVault hands the one you pick to your own torrent app. You are responsible for what you download and share.
+- **Wishlist.** Add a movie, a season or the next new episode of a show with the release you want (resolution, source, HDR, a size range, seeders). CineVault checks for it when it opens, shows new matches on Torrents with a count, and marks the title done once a copy that meets what you asked for arrives. A title you already have keeps being checked, with what you have shown on its entry. It never sends anything by itself.
+- **Desktop feel.** Light and dark themes that follow the system, zoom from 80% to 150%, keyboard chords for everyday actions, and a `cinevault` command line.
+- **Naming styles.** One Style control in Settings › Naming (Clean, Detailed, Media-server safe, Release info) fills the movie folder, movie file and TV episode templates; edit any of them to make your own. Release tokens keep the release group, tags and quality from the download's name. A Metadata only switch leaves every file and folder name alone and only writes NFOs and artwork; Rename after Scrape (off by default) renames a title as soon as it is scraped when its new names fit, with Undo. Each title can use its original or its localized title, and the file names of every artwork type are yours to choose (`poster.jpg`, `folder.jpg`, the movie's name in front, or several at once).
+- **Private by design.** You bring your own provider keys, kept in the OS credential store (the system keyring on Linux). No account, no telemetry.
+
+## Getting started
+
+1. **Install.** Download the installer from the [website](https://imtheyoyo.github.io/CineVault-FR/) or the [releases page](https://github.com/imtheyoyo/CineVault-FR/releases). The Windows builds are not code-signed yet, so SmartScreen ("More info", then "Run anyway") warns on first launch.
+   - **Linux (beta, 64-bit):** Ubuntu 22.04 or newer, Fedora 38 or newer. The AppImage needs FUSE 2 (`libfuse2t64` on Ubuntu 24.04): `chmod +x CineVault-x86_64.AppImage`, then open it; it updates itself from inside the app. Or install the `.deb` (`sudo apt install ./CineVault-amd64.deb`) or the `.rpm` (`sudo dnf install ./CineVault-x86_64.rpm`). If the window stays blank on some graphics drivers, start CineVault with `WEBKIT_DISABLE_DMABUF_RENDERER=1`.
+   - **macOS:** a version is planned.
+2. **Add your folders and a free TMDB key.** The first-run screen asks where your movies and shows are, then for a [TMDB API key](https://www.themoviedb.org/settings/api) (free; the only key needed to Scrape). A folder on a NAS that wants its own user name and password is added with **Network share…** next to **Add folder…**; CineVault keeps the password in your system's credential store.
+3. **Scan, Scrape, Rename.** Scanning starts on its own. Scrape your titles, check the Rename preview, apply. Everything can be undone from History.
+
+## Backups
+
+Your library, its History and everything Undo needs live in `library.db` in CineVault's data folder (`%APPDATA%\CineVault` on Windows, `~/.local/share/CineVault` on Linux, the `data` folder beside a portable copy, or the folder you chose in Settings). While CineVault runs it keeps a checked copy of it every day in the `backups` folder there, as `library-YYYY-MM-DD.db`, and keeps the last seven. If backups keep failing for three days, Activity says so.
+
+To bring one back:
+
+1. Quit CineVault (or stop the server).
+2. In the data folder, rename `library.db` to `library-before-restore.db`, and move `library.db-wal` and `library.db-shm` aside if they are there.
+3. Copy `backups/library-YYYY-MM-DD.db` to the data folder as `library.db`.
+4. Start CineVault.
+
+The library, History and Undo go back to that day. Files renamed or moved after it are found again by the next scan, but those changes cannot be undone from CineVault. To go back to where you were, swap the files the same way.
+
+## Use it in a browser (beta)
+
+Use your library from any phone, tablet, TV or computer at home. On a phone or tablet the layout fits the screen, and you can add CineVault to the home screen to open it like an app.
+
+**Easiest: Browser access in the desktop app** (Windows and Linux). Install CineVault as usual,
+open **Settings › Browser access**, set a password and switch it on. CineVault shows an address
+like `http://192.168.1.20:8787` and a QR code; open it on any device on your home network. Nothing
+else to install. On Windows, choose **Allow** when the firewall asks the first time. Optionally
+CineVault keeps running in the tray when you close the window and starts when you sign in.
+
+**Or run it as a server** on the computer that holds your movies (a NAS, a mini-PC or an always-on
+PC), so it works without a desktop session. Pick the way that fits; each is one command, and
+running it again updates CineVault, changes its folders or removes it.
+
+**Linux** (Ubuntu 22.04, Debian 12, Fedora 36 or newer; 64-bit): installs the `cinevault-server`
+package and starts it as a service.
+
+```sh
+curl -fsSL https://imtheyoyo.github.io/CineVault-FR/install.sh | sh
+```
+
+**Windows** (with [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/)
+installed and running): paste in PowerShell.
+
+```powershell
+irm https://imtheyoyo.github.io/CineVault-FR/install.ps1 | iex
+```
+
+**macOS** (with [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/)
+installed and running): paste in Terminal.
+
+```sh
+curl -fsSL https://imtheyoyo.github.io/CineVault-FR/install.sh | sh
+```
+
+**NAS and Docker:** an [Unraid template](packaging/unraid/cinevault.xml), a
+[Compose file](docker-compose.yml) for Synology, TrueNAS and others, and the image
+`ghcr.io/imtheyoyo/cinevault-fr` ([how to](packaging/README.md#install-by-hand-with-docker)).
+
+The installer asks for your movie and TV folders, starts CineVault and opens
+`http://localhost:8787`; it also prints the address to use from other devices. Then:
+
+1. **Choose a password** on the welcome page, from any device on your home network. It stays there
+   until a password is set. Forgot it later? **Forgot the password?** on the sign-in page gives you a
+   one-time PIN in CineVault's data folder ([how](packaging/README.md#everyday-use)).
+2. **Add your folders** in setup. On Linux they keep their usual paths. With Docker they appear under
+   `/media/`, for example your `D:\Movies` is `/media/Movies`; the installer prints the list.
+3. **Enter your free [TMDB key](https://www.themoviedb.org/settings/api)** and Scan.
+
+<picture>
+  <source srcset="site/img/server-login-light.webp" media="(prefers-color-scheme: light)">
+  <img src="site/img/server-login-dark.webp" width="1440" height="900" alt="The CineVault server sign-in page: one password field, a show/hide control and the recovery note">
+</picture>
+
+Keep it on your home network or behind a VPN; never forward its port to the internet. Not in the
+beta yet: ARM computers (Raspberry Pi, ARM NAS) and "Open in Kodi".
+**[The full guide](packaging/README.md)** covers each step, the commands to stop, start and update it,
+a forgotten password, backups, installing by hand with Docker or the packages,
+[library folders on a NAS](packaging/README.md#library-folders-on-a-nas) and troubleshooting.
+
+The desktop app and the server can share a data folder, but only one may open it at a time. The
+server holds a `library-owner.json` lock; the desktop app refuses that folder and the `cinevault`
+command line exits with code 2 instead of writing behind the server's back.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><img src=".github/assets/library-table.png" alt="The Library as a table with a Stage column of New, Scraped and Renamed tags"><br><sub>Library table: a Stage column, movable and resizable columns</sub></td>
+    <td width="50%" valign="top"><img src=".github/assets/search.png" alt="The search box with matching titles grouped as top hit, movies, TV shows and collections"><br><sub>Search as you type, with your recent searches</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src=".github/assets/detail.png" alt="A movie page with poster, ratings from several sources, the plot, facts, cast and the Technical card"><br><sub>Movie page: ratings, cast and the Technical card</sub></td>
+    <td width="50%" valign="top"><img src=".github/assets/rename.png" alt="The Rename page previewing renames and conflicts, with removed words struck through and added words marked"><br><sub>Rename: a word-level preview, conflicts resolved on the row</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src=".github/assets/naming.png" alt="Settings, Naming, with the Style control and the movie folder, movie file and TV episode templates"><br><sub>Naming: styles, artwork file names and Rename after Scrape</sub></td>
+    <td width="50%" valign="top"><img src=".github/assets/drives.png" alt="The Drives page with free space per drive and the titles of one drive, biggest first"><br><sub>Drives: free space and safe moves between drives</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src=".github/assets/torrents.png" alt="Torrent search for a movie you have: a You have this card with your copy, resolution chips and a Filter results field, and releases marked Better, Worse or Same as yours"><br><sub>Torrents: what you have, and whether each release is better</sub></td>
+    <td width="50%" valign="top"><img src=".github/assets/wishlist.png" alt="The Wishlist: titles with the release wanted, their matches with Send to torrent app and Dismiss, and Check now"><br><sub>Wishlist: say what you want, see when it turns up</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src=".github/assets/first-run.png" alt="The first-run setup asking where the movies and shows are"><br><sub>First run: add your folders, then your own provider keys</sub></td>
+    <td width="50%" valign="top"></td>
+  </tr>
+</table>
+
+<p align="center"><sub>Screenshots are taken against the app's built-in sample library.</sub></p>
+
+## Build from source
+
+You need the [Rust](https://rustup.rs) stable toolchain (MSVC on Windows), [bun](https://bun.sh) and the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) (WebView2 on Windows; on Linux the WebKitGTK and `libdbus` development packages).
+
+```sh
+bun install && (cd ui && bun install)
+bun run tools:fetch      # pinned MediaInfo, FFmpeg and helper tools into .dev-tools/
+bun run tauri dev        # run the desktop app
+bun run tauri build      # installers under target/release/bundle/
+```
+
+The checks to run before a pull request are listed in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Contributing
+
+CineVault is open source, and contributions are welcome: bug reports, ideas, documentation and pull requests. Questions and open-ended ideas belong in [Discussions](https://github.com/imtheyoyo/CineVault-FR/discussions); the issue tracker is for bugs and concrete features. Read [CONTRIBUTING.md](CONTRIBUTING.md) first; contributors and AI coding assistants also follow [AGENTS.md](AGENTS.md). Every change, including the maintainer's, lands through a pull request from a branch, and CI must pass before it is merged. Please report security issues privately, as described in [SECURITY.md](SECURITY.md).
+
+## Licence
+
+CineVault is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+<sub>This product uses the TMDB API but is not endorsed or certified by TMDB.</sub>

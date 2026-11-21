@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question or share an idea
+    url: https://github.com/imtheyoyo/CineVault-FR/discussions
+    about: Setup help, naming templates, how-do-I questions and open-ended ideas belong in Discussions, not the issue tracker.
+  - name: Report a security vulnerability
+    url: https://github.com/imtheyoyo/CineVault-FR/security/advisories/new
+    about: Please report security problems privately, not in a public issue.
+  - name: Download CineVault
+    url: https://imtheyoyo.github.io/CineVault-FR/
+    about: The latest installers for Windows and Linux.

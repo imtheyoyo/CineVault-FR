@@ -1,0 +1,1952 @@
+//! Sign-in for the browser server: one user, one password, server-side sessions.
+//!
+//! On the headless server, the first start has no password. The welcome page lets the first
+//! browser on the home network set one, for as long as none exists; a browser from a public
+//! address is told to finish setup from home. A forgotten password is reset with a one-time PIN
+//! written to a file in the data folder, or with `cinevault-server passwd` on the server.
+//!
+//! In the desktop app's Browser access the password is set in the app's Settings, so there is no
+//! welcome page and no PIN; the sign-in page says where to change it.
+//!
+//! The password is argon2id with a random salt, stored in `server-auth.json` written atomically
+//! with mode `0600`. A session is a random id in a cookie. The server keeps only its SHA-256, in
+//! memory and in `server-sessions.json` (also atomic and `0600`), so a restart keeps browsers
+//! signed in, while the file alone signs nobody in. A new password ends every session, also one
+//! set by `cinevault-server passwd` while the server was stopped.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
+
+use argon2::Argon2;
+use argon2::password_hash::phc::PasswordHash;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
+use axum::http::HeaderMap;
+use rand_core::{OsRng, RngCore};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+
+/// The file the password hash lives in, inside the data folder.
+pub const AUTH_FILE: &str = "server-auth.json";
+/// The file the signed-in sessions are kept in, inside the data folder.
+pub const SESSIONS_FILE: &str = "server-sessions.json";
+/// The file the password-reset PIN is written to, inside the data folder.
+pub const PIN_FILE: &str = "password-reset-pin.txt";
+const VERSION: u32 = 1;
+
+/// The head tags that let a phone or a browser install CineVault as an app (Add to Home Screen
+/// on iOS, Install app on Android and desktop browsers): the manifest, the icons, the full-screen
+/// mode and the colour of the window ground. The browser shell and the server's own pages carry
+/// them, since people often add the app from the sign-in page.
+pub const INSTALL_HEAD: &str = concat!(
+    r#"<link rel="manifest" href="/manifest.webmanifest">"#,
+    r#"<link rel="icon" href="/favicon.svg" type="image/svg+xml">"#,
+    r#"<link rel="apple-touch-icon" href="/apple-touch-icon.png">"#,
+    r#"<meta name="mobile-web-app-capable" content="yes">"#,
+    r#"<meta name="apple-mobile-web-app-capable" content="yes">"#,
+    r#"<meta name="apple-mobile-web-app-status-bar-style" content="black">"#,
+    r#"<meta name="apple-mobile-web-app-title" content="CineVault">"#,
+    r##"<meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)">"##,
+    r##"<meta name="theme-color" content="#f2f1ee" media="(prefers-color-scheme: light)">"##,
+);
+/// A setup claim that is not used for this long lapses, so an abandoned tab cannot hold setup.
+const CLAIM_LAPSE: Duration = Duration::from_secs(30 * 60);
+const SESSION_IDLE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const SESSION_MAX: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+const MAX_SESSIONS: usize = 32;
+/// How often the uses of sessions alone are written to the sessions file, so browsing does not
+/// write on every request.
+const USES_WRITTEN_EVERY: Duration = Duration::from_secs(5 * 60);
+const MAX_FAILURES: usize = 5;
+const MAX_GLOBAL_FAILURES: usize = 100;
+const FAILURE_WINDOW: Duration = Duration::from_secs(60);
+/// Password checks that may run at once, whatever the rate of attempts.
+const MAX_CHECKS: usize = 2;
+/// How long a reset PIN is valid.
+pub const PIN_LIFETIME: Duration = Duration::from_secs(15 * 60);
+/// Wrong PINs before the PIN is void.
+const PIN_ATTEMPTS: u32 = 5;
+/// How long after a PIN ends before another can be made.
+const PIN_COOLDOWN: Duration = Duration::from_secs(60);
+/// How many digits a PIN has.
+const PIN_DIGITS: u32 = 8;
+/// The longest browser description kept for a session.
+const AGENT_MAX: usize = 200;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AuthFile {
+    version: u32,
+    /// The PHC string, which already carries the salt and the parameters.
+    hash: String,
+}
+
+/// `server-sessions.json`: the sessions of the password whose fingerprint it names.
+#[derive(Debug, Deserialize, Serialize)]
+struct SessionsFile {
+    version: u32,
+    /// The SHA-256 of the password's PHC string; another password drops every session.
+    password: String,
+    sessions: Vec<StoredSession>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredSession {
+    /// The session's key, the SHA-256 of its cookie; never the cookie itself.
+    id: String,
+    /// Kept so open pages keep working after a restart; useless without the cookie.
+    csrf: String,
+    handle: String,
+    address: String,
+    agent: String,
+    /// Milliseconds since the epoch.
+    signed_in: u64,
+    last_used: u64,
+}
+
+/// The live sessions and when they were last written.
+struct Sessions {
+    /// By [`session_key`].
+    map: HashMap<String, Session>,
+    written: Instant,
+    /// A session was used since the file was written.
+    used: bool,
+}
+
+/// Where the sign-in runs: the headless server, or the desktop app's Browser access.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostMode {
+    Server,
+    /// The desktop app on the named computer; the password is set in its Settings.
+    Desktop {
+        computer: String,
+    },
+}
+
+#[derive(Clone)]
+pub struct Session {
+    pub csrf: String,
+    /// A public id for the session list; the cookie value never leaves the server.
+    pub handle: String,
+    pub address: String,
+    pub agent: String,
+    pub signed_in: SystemTime,
+    pub last_used: SystemTime,
+}
+
+impl Session {
+    /// Neither the idle nor the absolute lifetime has passed. Wall-clock times, so the answer
+    /// holds across a restart.
+    fn live_at(&self, now: SystemTime) -> bool {
+        now.duration_since(self.last_used).unwrap_or_default() <= SESSION_IDLE
+            && now.duration_since(self.signed_in).unwrap_or_default() <= SESSION_MAX
+    }
+}
+
+/// The key a session is kept under: the SHA-256 of its cookie value, so what the server holds
+/// cannot be used as a cookie. The value is 32 random bytes, so a slow hash would add nothing.
+#[must_use]
+pub fn session_key(id: &str) -> String {
+    sha256_hex(id.as_bytes())
+}
+
+/// One signed-in browser, as the desktop's Browser access section lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    pub handle: String,
+    pub address: String,
+    pub agent: String,
+    /// Milliseconds since the epoch.
+    pub signed_in_ms: u64,
+    pub last_used_ms: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    #[error("The password must be at least 12 characters.")]
+    TooShort,
+    #[error("The passwords do not match.")]
+    Mismatch,
+    #[error("That password is not right.")]
+    WrongPassword,
+    #[error("Too many attempts. Wait a minute and try again.")]
+    TooManyAttempts,
+    #[error("No password is set yet. Open CineVault from your home network to create one.")]
+    NoPassword,
+    #[error("A password is already set. Sign in instead.")]
+    AlreadySet,
+    #[error("Setup is in progress in another browser.")]
+    SetupClaimed,
+    #[error("Finish setup from your home network.")]
+    NotHomeNetwork,
+    #[error("The server's sign-in file could not be read: {0}")]
+    Io(#[from] std::io::Error),
+    #[error(
+        "The server's sign-in file is damaged. Move it aside and restart to set a new password."
+    )]
+    Damaged,
+    #[error("The password could not be hashed: {0}")]
+    Hash(String),
+    #[error("Change it in CineVault's Settings on {0}.")]
+    DesktopReset(String),
+    #[error("A PIN was made less than a minute ago. Wait a minute and ask again.")]
+    ResetTooSoon,
+    #[error("There is no reset PIN, or it expired. Ask for a new one.")]
+    NoPin,
+    #[error("That PIN is not right. {0} tries left.")]
+    WrongPin(u32),
+    #[error("That PIN is not right. It is no longer valid; ask for a new one in a minute.")]
+    PinVoid,
+}
+
+/// A reset PIN that is live.
+struct ResetPin {
+    pin: String,
+    expires: Instant,
+    attempts: u32,
+}
+
+#[derive(Default)]
+struct ResetState {
+    active: Option<ResetPin>,
+    ended: Option<Instant>,
+}
+
+/// The answer to "Forgot password?": where the PIN is, and whether this request made it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResetStarted {
+    pub path: PathBuf,
+    pub created: bool,
+}
+
+/// The password, the live sessions, the welcome claim and the reset PIN.
+pub struct Auth {
+    path: PathBuf,
+    data_dir: PathBuf,
+    host: HostMode,
+    password: Mutex<Option<AuthFile>>,
+    sessions: Mutex<Sessions>,
+    setup_claim: Mutex<Option<(String, Instant)>>,
+    failures: Mutex<Failures>,
+    /// Permits for the password checks, which run on blocking threads.
+    checks: tokio::sync::Semaphore,
+    reset: Mutex<ResetState>,
+}
+
+#[derive(Default)]
+struct Failures {
+    per_client: HashMap<String, Vec<Instant>>,
+    global: Vec<Instant>,
+}
+
+impl Failures {
+    fn prune(&mut self, now: Instant) {
+        self.per_client.retain(|_, attempts| {
+            attempts.retain(|at| now.duration_since(*at) <= FAILURE_WINDOW);
+            !attempts.is_empty()
+        });
+        self.global
+            .retain(|at| now.duration_since(*at) <= FAILURE_WINDOW);
+    }
+
+    /// The address's own limit, and the global ceiling for an address outside the home network,
+    /// so a flood from the internet cannot lock the owner out at home.
+    fn blocked(&self, client: &str, home: bool) -> bool {
+        (!home && self.global.len() >= MAX_GLOBAL_FAILURES)
+            || self
+                .per_client
+                .get(client)
+                .is_some_and(|attempts| attempts.len() >= MAX_FAILURES)
+    }
+
+    fn record(&mut self, client: &str, now: Instant) {
+        self.per_client
+            .entry(client.to_owned())
+            .or_default()
+            .push(now);
+        self.global.push(now);
+    }
+
+    /// A right password: the address starts afresh and its provisional failure is taken back.
+    fn clear(&mut self, client: &str, at: Instant) {
+        self.per_client.remove(client);
+        if let Some(position) = self.global.iter().position(|recorded| *recorded == at) {
+            self.global.remove(position);
+        }
+    }
+}
+
+fn millis(time: SystemTime) -> u64 {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn from_millis(millis: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_millis(millis)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// What the sessions file binds its sessions to: the SHA-256 of the password's PHC string, or
+/// nothing while there is no password.
+fn fingerprint(password: Option<&AuthFile>) -> String {
+    password.map_or_else(String::new, |file| sha256_hex(file.hash.as_bytes()))
+}
+
+/// The sessions of an earlier run, and whether any were dropped. Sessions of another password or
+/// past their lifetime are dropped. A file that cannot be read is set aside as `.bad` and the
+/// server starts with no sessions: everyone signs in again, nothing else is affected.
+fn load_sessions(path: &Path, password: &str) -> (HashMap<String, Session>, bool) {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (HashMap::new(), false);
+        }
+        Err(error) => {
+            set_aside(path, &error.to_string());
+            return (HashMap::new(), false);
+        }
+    };
+    let file = match serde_json::from_slice::<SessionsFile>(&bytes) {
+        Ok(file) if file.version == VERSION => file,
+        Ok(file) => {
+            set_aside(path, &format!("version {} is not known", file.version));
+            return (HashMap::new(), false);
+        }
+        Err(error) => {
+            set_aside(path, &error.to_string());
+            return (HashMap::new(), false);
+        }
+    };
+    if file.password != password {
+        return (HashMap::new(), !file.sessions.is_empty());
+    }
+    let now = SystemTime::now();
+    let stored = file.sessions.len();
+    let sessions: HashMap<String, Session> = file
+        .sessions
+        .into_iter()
+        .map(|session| {
+            (
+                session.id,
+                Session {
+                    csrf: session.csrf,
+                    handle: session.handle,
+                    address: session.address,
+                    agent: session.agent,
+                    signed_in: from_millis(session.signed_in),
+                    last_used: from_millis(session.last_used),
+                },
+            )
+        })
+        .filter(|(_, session)| session.live_at(now))
+        .collect();
+    let dropped = sessions.len() != stored;
+    (sessions, dropped)
+}
+
+/// Moves an unreadable sessions file to `server-sessions.json.bad`, replacing an older one.
+fn set_aside(path: &Path, why: &str) {
+    let aside = path.with_extension("json.bad");
+    let _ = std::fs::remove_file(&aside);
+    let moved = std::fs::rename(path, &aside);
+    tracing::warn!(
+        file = %path.display(),
+        why,
+        set_aside = moved.is_ok(),
+        "the sessions file could not be read; every browser signs in again"
+    );
+}
+
+fn hash_password(password: &str) -> Result<AuthFile, AuthError> {
+    // argon2id, v19, m=19456, t=2, p=1 and a random 16-byte salt from the system: the same PHC
+    // string earlier versions wrote, so a password file works in either direction.
+    let hash = Argon2::default()
+        .hash_password(password.as_bytes())
+        .map_err(|error| AuthError::Hash(error.to_string()))?
+        .to_string();
+    Ok(AuthFile {
+        version: VERSION,
+        hash,
+    })
+}
+
+/// Whether `password` matches the PHC string `hash`. Argon2 is slow on purpose; call it off the
+/// async workers.
+fn verify_hash(hash: &str, password: &str) -> bool {
+    PasswordHash::new(hash).is_ok_and(|parsed| {
+        Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok()
+    })
+}
+
+/// Checks the length and the confirmation of a new password.
+pub fn check_new_password(password: &str, confirm: &str) -> Result<(), AuthError> {
+    if password.chars().count() < 12 {
+        return Err(AuthError::TooShort);
+    }
+    if password != confirm {
+        return Err(AuthError::Mismatch);
+    }
+    Ok(())
+}
+
+impl Auth {
+    /// Opens the sign-in state of a data folder for the headless server. A damaged file is
+    /// refused rather than silently treated as "no password".
+    pub fn open(data_dir: &Path) -> Result<Self, AuthError> {
+        Self::open_as(data_dir, HostMode::Server)
+    }
+
+    /// Opens the sign-in state for the given host.
+    pub fn open_as(data_dir: &Path, host: HostMode) -> Result<Self, AuthError> {
+        let path = data_dir.join(AUTH_FILE);
+        let password = match std::fs::read(&path) {
+            Ok(bytes) => {
+                let file: AuthFile =
+                    serde_json::from_slice(&bytes).map_err(|_| AuthError::Damaged)?;
+                if file.version != VERSION {
+                    return Err(AuthError::Damaged);
+                }
+                Some(file)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(AuthError::Io(error)),
+        };
+        // A PIN lives in memory; one left in a file by an earlier run can no longer be used.
+        let _ = std::fs::remove_file(data_dir.join(PIN_FILE));
+        let (sessions, dropped) = load_sessions(
+            &data_dir.join(SESSIONS_FILE),
+            &fingerprint(password.as_ref()),
+        );
+        let auth = Self {
+            path,
+            data_dir: data_dir.to_path_buf(),
+            host,
+            password: Mutex::new(password),
+            sessions: Mutex::new(Sessions {
+                map: sessions,
+                written: Instant::now(),
+                used: false,
+            }),
+            setup_claim: Mutex::new(None),
+            failures: Mutex::new(Failures::default()),
+            checks: tokio::sync::Semaphore::new(MAX_CHECKS),
+            reset: Mutex::new(ResetState::default()),
+        };
+        if dropped {
+            // The dropped sessions leave the disk too.
+            auth.save(&mut Self::lock(&auth.sessions));
+        }
+        Ok(auth)
+    }
+
+    /// Whether a data folder has a usable password file, without opening the sign-in state (and
+    /// without touching any other file in the folder).
+    #[must_use]
+    pub fn password_exists(data_dir: &Path) -> bool {
+        std::fs::read(data_dir.join(AUTH_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<AuthFile>(&bytes).ok())
+            .is_some_and(|file| file.version == VERSION)
+    }
+
+    fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+        mutex.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Where this sign-in runs.
+    pub fn host(&self) -> &HostMode {
+        &self.host
+    }
+
+    pub fn has_password(&self) -> bool {
+        self.current().is_some()
+    }
+
+    /// The password as it is on disk now. `cinevault-server passwd` and the desktop's Settings
+    /// write the file while the server runs, and the new password must work without a restart;
+    /// a password changed that way ends every session. A file that cannot be read or parsed
+    /// keeps the password already in memory.
+    fn current(&self) -> Option<AuthFile> {
+        let mut guard = Self::lock(&self.password);
+        let mut changed = false;
+        if let Ok(bytes) = std::fs::read(&self.path)
+            && let Ok(file) = serde_json::from_slice::<AuthFile>(&bytes)
+            && file.version == VERSION
+        {
+            changed = guard.as_ref().is_some_and(|known| known.hash != file.hash);
+            *guard = Some(file);
+        }
+        let file = (*guard).clone();
+        drop(guard);
+        if changed {
+            self.logout_all_except(None);
+        }
+        file
+    }
+
+    /// True on the headless server while no password exists. The desktop never shows the
+    /// welcome page: its password is set in the app.
+    pub fn needs_setup(&self) -> bool {
+        self.host == HostMode::Server && !self.has_password()
+    }
+
+    /// Claims the setup for this browser, or checks the claim it already holds. A claim that was
+    /// not used for 30 minutes lapses and can be taken by another browser.
+    pub fn claim_setup(&self, existing: Option<&str>) -> Result<String, AuthError> {
+        self.claim_setup_at(existing, Instant::now())
+    }
+
+    fn claim_setup_at(&self, existing: Option<&str>, now: Instant) -> Result<String, AuthError> {
+        if !self.needs_setup() {
+            return Err(AuthError::AlreadySet);
+        }
+        let mut claim = Self::lock(&self.setup_claim);
+        if let Some((current, used)) = claim.as_mut() {
+            if existing == Some(current.as_str()) {
+                *used = now;
+                return Ok(current.clone());
+            }
+            if now.duration_since(*used) < CLAIM_LAPSE {
+                return Err(AuthError::SetupClaimed);
+            }
+        }
+        let id = random_hex(16);
+        *claim = Some((id.clone(), now));
+        Ok(id)
+    }
+
+    /// Sets the first password from the welcome page and signs the browser in.
+    pub fn set_password(
+        &self,
+        password: &str,
+        confirm: &str,
+        claim: &str,
+        address: &str,
+        agent: &str,
+    ) -> Result<(String, Session), AuthError> {
+        if !self.needs_setup() {
+            return Err(AuthError::AlreadySet);
+        }
+        if Self::lock(&self.setup_claim)
+            .as_ref()
+            .map(|(id, _)| id.as_str())
+            != Some(claim)
+        {
+            return Err(AuthError::SetupClaimed);
+        }
+        check_new_password(password, confirm)?;
+        self.write(hash_password(password)?)?;
+        *Self::lock(&self.setup_claim) = None;
+        Ok(self.create_session(address, agent))
+    }
+
+    /// Writes the password file. The lock is held across the write, so [`Self::current`] never
+    /// sees this process's own change as one made elsewhere.
+    fn write(&self, file: AuthFile) -> Result<(), AuthError> {
+        let bytes =
+            serde_json::to_vec(&file).map_err(|error| AuthError::Hash(error.to_string()))?;
+        let mut password = Self::lock(&self.password);
+        cv_fs::write_atomic_with_mode(&self.path, &bytes, 0o600)?;
+        *password = Some(file);
+        Ok(())
+    }
+
+    /// Sets the password without the setup claim or a session: `cinevault-server passwd` on the
+    /// machine that holds the data folder, and the desktop's Settings. Being at the machine is
+    /// the trust boundary. Every session this state knows ends; a running server's caller ends
+    /// its own.
+    pub fn set_password_unattended(&self, password: &str) -> Result<(), AuthError> {
+        if password.chars().count() < 12 {
+            return Err(AuthError::TooShort);
+        }
+        self.write(hash_password(password)?)?;
+        *Self::lock(&self.setup_claim) = None;
+        self.logout_all_except(None);
+        Ok(())
+    }
+
+    /// Changes the password from a signed-in session. The current password is required; the
+    /// caller ends every other session.
+    pub async fn change_password(
+        &self,
+        current: &str,
+        password: &str,
+        confirm: &str,
+    ) -> Result<(), AuthError> {
+        check_new_password(password, confirm)?;
+        if self.current().is_none() {
+            return Err(AuthError::NoPassword);
+        }
+        if !self.check_password(current).await {
+            return Err(AuthError::WrongPassword);
+        }
+        self.write(hash_password(password)?)
+    }
+
+    /// Checks a password without starting a session (for a sensitive confirmation).
+    pub async fn check_password(&self, password: &str) -> bool {
+        let Some(file) = self.current() else {
+            return false;
+        };
+        self.check_hash(file.hash, password).await.unwrap_or(false)
+    }
+
+    /// The same check on this thread, for the command line, which has nothing else to run.
+    pub fn check_password_blocking(&self, password: &str) -> bool {
+        self.current()
+            .is_some_and(|file| verify_hash(&file.hash, password))
+    }
+
+    /// Runs one password check on a blocking thread, at most [`MAX_CHECKS`] at a time.
+    async fn check_hash(&self, hash: String, password: &str) -> Result<bool, AuthError> {
+        let _permit = self
+            .checks
+            .acquire()
+            .await
+            .map_err(|error| AuthError::Hash(error.to_string()))?;
+        let password = password.to_owned();
+        tokio::task::spawn_blocking(move || verify_hash(&hash, &password))
+            .await
+            .map_err(|error| AuthError::Hash(error.to_string()))
+    }
+
+    /// Checks a password and starts a session, with the five-a-minute limit per address and,
+    /// outside the home network, the global ceiling. The attempt is recorded as a failure before
+    /// the check and taken back when the password is right, so concurrent attempts cannot slip
+    /// past the limit together, and the failures lock is not held while the check runs.
+    pub async fn login(
+        &self,
+        password: &str,
+        client: &str,
+        agent: &str,
+        home: bool,
+    ) -> Result<(String, Session), AuthError> {
+        let Some(file) = self.current() else {
+            return Err(AuthError::NoPassword);
+        };
+        PasswordHash::new(&file.hash).map_err(|_| AuthError::Damaged)?;
+        let at = Instant::now();
+        {
+            let mut failures = Self::lock(&self.failures);
+            failures.prune(at);
+            if failures.blocked(client, home) {
+                return Err(AuthError::TooManyAttempts);
+            }
+            failures.record(client, at);
+        }
+        if !self.check_hash(file.hash, password).await? {
+            return Err(AuthError::WrongPassword);
+        }
+        Self::lock(&self.failures).clear(client, at);
+        Ok(self.create_session(client, agent))
+    }
+
+    /// The live session, if the id is valid and neither the idle nor the absolute lifetime passed.
+    pub fn session(&self, id: &str) -> Option<Session> {
+        let key = session_key(id);
+        let now = SystemTime::now();
+        let mut sessions = Self::lock(&self.sessions);
+        let session = sessions.map.get_mut(&key)?;
+        if !session.live_at(now) {
+            sessions.map.remove(&key);
+            return None;
+        }
+        session.last_used = now;
+        let session = session.clone();
+        sessions.used = true;
+        if sessions.written.elapsed() >= USES_WRITTEN_EVERY {
+            self.save(&mut sessions);
+        }
+        Some(session)
+    }
+
+    /// Whether the session is still live, without counting as a use (a media stream checks this
+    /// once per chunk).
+    pub fn is_live(&self, id: &str) -> bool {
+        Self::lock(&self.sessions)
+            .map
+            .contains_key(&session_key(id))
+    }
+
+    pub fn logout(&self, id: &str) {
+        let mut sessions = Self::lock(&self.sessions);
+        if sessions.map.remove(&session_key(id)).is_some() {
+            self.save(&mut sessions);
+        }
+    }
+
+    /// Ends every session except the one with the id `keep`, and returns the keys that ended.
+    pub fn logout_all_except(&self, keep: Option<&str>) -> Vec<String> {
+        let keep = keep.map(session_key);
+        let mut sessions = Self::lock(&self.sessions);
+        let ended: Vec<String> = sessions
+            .map
+            .keys()
+            .filter(|key| Some(*key) != keep.as_ref())
+            .cloned()
+            .collect();
+        sessions.map.retain(|key, _| Some(key) == keep.as_ref());
+        // Written even when nothing ended: after a password change, the kept session is bound
+        // to the new password.
+        self.save(&mut sessions);
+        ended
+    }
+
+    /// Ends the session with this public handle, and returns its key.
+    pub fn logout_handle(&self, handle: &str) -> Option<String> {
+        let mut sessions = Self::lock(&self.sessions);
+        let key = sessions
+            .map
+            .iter()
+            .find(|(_, session)| session.handle == handle)
+            .map(|(key, _)| key.clone())?;
+        sessions.map.remove(&key);
+        self.save(&mut sessions);
+        Some(key)
+    }
+
+    /// Writes the uses not written yet, for a process that is about to quit.
+    pub fn flush(&self) {
+        let mut sessions = Self::lock(&self.sessions);
+        if sessions.used {
+            self.save(&mut sessions);
+        }
+    }
+
+    /// Writes the sessions file without the sessions that expired. A failure is logged and the
+    /// sessions stay in memory.
+    fn save(&self, sessions: &mut Sessions) {
+        let now = SystemTime::now();
+        sessions.map.retain(|_, session| session.live_at(now));
+        sessions.written = Instant::now();
+        sessions.used = false;
+        let file = SessionsFile {
+            version: VERSION,
+            password: fingerprint(Self::lock(&self.password).as_ref()),
+            sessions: sessions
+                .map
+                .iter()
+                .map(|(key, session)| StoredSession {
+                    id: key.clone(),
+                    csrf: session.csrf.clone(),
+                    handle: session.handle.clone(),
+                    address: session.address.clone(),
+                    agent: session.agent.clone(),
+                    signed_in: millis(session.signed_in),
+                    last_used: millis(session.last_used),
+                })
+                .collect(),
+        };
+        let written = serde_json::to_vec(&file)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| {
+                cv_fs::write_atomic_with_mode(&self.data_dir.join(SESSIONS_FILE), &bytes, 0o600)
+            });
+        if let Err(error) = written {
+            tracing::warn!(%error, "the sessions file could not be written");
+        }
+    }
+
+    pub fn live_sessions(&self) -> usize {
+        Self::lock(&self.sessions).map.len()
+    }
+
+    /// Every live session, the most recently used first.
+    pub fn sessions(&self) -> Vec<SessionInfo> {
+        let sessions = Self::lock(&self.sessions);
+        let mut list: Vec<SessionInfo> = sessions
+            .map
+            .values()
+            .map(|session| SessionInfo {
+                handle: session.handle.clone(),
+                address: session.address.clone(),
+                agent: session.agent.clone(),
+                signed_in_ms: millis(session.signed_in),
+                last_used_ms: millis(session.last_used),
+            })
+            .collect();
+        list.sort_by_key(|session| std::cmp::Reverse(session.last_used_ms));
+        list
+    }
+
+    fn create_session(&self, address: &str, agent: &str) -> (String, Session) {
+        let now = SystemTime::now();
+        let mut sessions = Self::lock(&self.sessions);
+        sessions.map.retain(|_, session| session.live_at(now));
+        if sessions.map.len() >= MAX_SESSIONS
+            && let Some(oldest) = sessions
+                .map
+                .iter()
+                .min_by_key(|(_, session)| session.last_used)
+                .map(|(key, _)| key.clone())
+        {
+            sessions.map.remove(&oldest);
+        }
+        let id = random_hex(32);
+        let session = Session {
+            csrf: random_hex(32),
+            handle: random_hex(16),
+            address: address.to_owned(),
+            agent: agent.chars().take(AGENT_MAX).collect(),
+            signed_in: now,
+            last_used: now,
+        };
+        sessions.map.insert(session_key(&id), session.clone());
+        self.save(&mut sessions);
+        (id, session)
+    }
+
+    /// The reset PIN file.
+    pub fn pin_path(&self) -> PathBuf {
+        self.data_dir.join(PIN_FILE)
+    }
+
+    /// "Forgot password?" on the headless server: makes a PIN and writes it to the PIN file, or
+    /// points at the one that is still live. The caller has checked that the browser is on the
+    /// home network.
+    pub fn start_reset(&self) -> Result<ResetStarted, AuthError> {
+        self.start_reset_at(Instant::now())
+    }
+
+    fn start_reset_at(&self, now: Instant) -> Result<ResetStarted, AuthError> {
+        if let HostMode::Desktop { computer } = &self.host {
+            return Err(AuthError::DesktopReset(computer.clone()));
+        }
+        let mut reset = Self::lock(&self.reset);
+        self.expire(&mut reset, now);
+        if reset.active.is_some() {
+            return Ok(ResetStarted {
+                path: self.pin_path(),
+                created: false,
+            });
+        }
+        if reset
+            .ended
+            .is_some_and(|ended| now.duration_since(ended) < PIN_COOLDOWN)
+        {
+            return Err(AuthError::ResetTooSoon);
+        }
+        let pin = random_pin();
+        let expires_at = SystemTime::now() + PIN_LIFETIME;
+        let text = format!(
+            "CineVault password reset PIN: {pin}\n\nEnter it on the sign-in page with a new password.\nIt works once and expires at {} UTC (15 minutes after it was made).\n",
+            clock_utc(expires_at)
+        );
+        cv_fs::write_atomic_with_mode(&self.pin_path(), text.as_bytes(), 0o600)?;
+        reset.active = Some(ResetPin {
+            pin,
+            expires: now + PIN_LIFETIME,
+            attempts: 0,
+        });
+        tracing::warn!(
+            file = %self.pin_path().display(),
+            expires_utc = %clock_utc(expires_at),
+            "a password reset PIN was written to the data folder (docker: docker exec <container> cat /data/{PIN_FILE})"
+        );
+        Ok(ResetStarted {
+            path: self.pin_path(),
+            created: true,
+        })
+    }
+
+    /// Ends an expired PIN and deletes its file.
+    fn expire(&self, reset: &mut ResetState, now: Instant) {
+        if reset.active.as_ref().is_some_and(|pin| now >= pin.expires) {
+            reset.active = None;
+            reset.ended = Some(now);
+            let _ = std::fs::remove_file(self.pin_path());
+        }
+    }
+
+    /// Sets a new password with the PIN, ends every session and signs this browser in. The PIN
+    /// is compared in constant time; five wrong ones void it. A right PIN with an unusable new
+    /// password is refused without spending the PIN.
+    pub fn finish_reset(
+        &self,
+        pin: &str,
+        password: &str,
+        confirm: &str,
+        address: &str,
+        agent: &str,
+    ) -> Result<(String, Session), AuthError> {
+        self.finish_reset_at(pin, password, confirm, address, agent, Instant::now())
+    }
+
+    fn finish_reset_at(
+        &self,
+        pin: &str,
+        password: &str,
+        confirm: &str,
+        address: &str,
+        agent: &str,
+        now: Instant,
+    ) -> Result<(String, Session), AuthError> {
+        if let HostMode::Desktop { computer } = &self.host {
+            return Err(AuthError::DesktopReset(computer.clone()));
+        }
+        let mut reset = Self::lock(&self.reset);
+        self.expire(&mut reset, now);
+        let Some(active) = reset.active.as_mut() else {
+            return Err(AuthError::NoPin);
+        };
+        let given = pin.trim().as_bytes();
+        let right =
+            given.len() == active.pin.len() && bool::from(given.ct_eq(active.pin.as_bytes()));
+        if !right {
+            active.attempts += 1;
+            if active.attempts >= PIN_ATTEMPTS {
+                reset.active = None;
+                reset.ended = Some(now);
+                let _ = std::fs::remove_file(self.pin_path());
+                return Err(AuthError::PinVoid);
+            }
+            return Err(AuthError::WrongPin(PIN_ATTEMPTS - active.attempts));
+        }
+        check_new_password(password, confirm)?;
+        self.write(hash_password(password)?)?;
+        reset.active = None;
+        reset.ended = Some(now);
+        let _ = std::fs::remove_file(self.pin_path());
+        drop(reset);
+        *Self::lock(&self.setup_claim) = None;
+        self.logout_all_except(None);
+        Ok(self.create_session(address, agent))
+    }
+}
+
+/// Gives `file` to the owner of `folder` when they differ, so a password file written by root
+/// stays readable by the server that runs as the data folder's owner. Only root can change an
+/// owner; for anyone else the owners already match, and a failure leaves the file as it is.
+#[cfg(unix)]
+pub fn give_to_folder_owner(file: &Path, folder: &Path) {
+    use std::os::unix::fs::MetadataExt as _;
+    let (Ok(file_meta), Ok(folder_meta)) = (std::fs::metadata(file), std::fs::metadata(folder))
+    else {
+        return;
+    };
+    if (file_meta.uid(), file_meta.gid()) != (folder_meta.uid(), folder_meta.gid())
+        && let Err(error) =
+            std::os::unix::fs::chown(file, Some(folder_meta.uid()), Some(folder_meta.gid()))
+    {
+        tracing::warn!(%error, "the password file could not be given to the data folder's owner");
+    }
+}
+
+/// Windows has no owner to hand over; the file inherits the folder's access rules.
+#[cfg(not(unix))]
+pub fn give_to_folder_owner(_file: &Path, _folder: &Path) {}
+
+fn random_hex(bytes: usize) -> String {
+    let mut buffer = vec![0u8; bytes];
+    OsRng.fill_bytes(&mut buffer);
+    buffer.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// An 8-digit PIN, uniform over every value (rejection sampling, no modulo bias).
+fn random_pin() -> String {
+    let limit = 10_u32.pow(PIN_DIGITS);
+    // The largest multiple of `limit` that fits in a u32.
+    let zone = u32::MAX - (u32::MAX % limit);
+    loop {
+        let value = OsRng.next_u32();
+        if value < zone {
+            return format!("{:0width$}", value % limit, width = PIN_DIGITS as usize);
+        }
+    }
+}
+
+/// `HH:MM` in UTC, for the PIN file and the log.
+fn clock_utc(time: SystemTime) -> String {
+    let seconds = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let day = seconds % 86_400;
+    format!("{:02}:{:02}", day / 3600, (day % 3600) / 60)
+}
+
+/// One cookie's value from a request.
+pub fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(axum::http::header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .filter_map(|part| part.trim().split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value.to_owned())
+}
+
+/// The sign-in cookie. `Secure` is added when the request arrived over HTTPS.
+pub fn session_cookie(id: &str, secure: bool) -> String {
+    format!(
+        "cv_session={id}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+        30 * 24 * 60 * 60
+    ) + if secure { "; Secure" } else { "" }
+}
+
+/// The cookie that ties the welcome page to one browser.
+pub fn setup_cookie(id: &str, secure: bool) -> String {
+    format!("cv_setup={id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800")
+        + if secure { "; Secure" } else { "" }
+}
+
+pub fn clear_cookie(name: &str, secure: bool) -> String {
+    format!("{name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
+        + if secure { "; Secure" } else { "" }
+}
+
+/// Text for an HTML page: the five characters that matter escaped.
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// The "Forgot password?" part of the sign-in page.
+fn recovery(host: &HostMode) -> String {
+    match host {
+        HostMode::Desktop { computer } => format!(
+            r#"<details><summary>Forgot the password?</summary><p>Change it in CineVault's Settings on {}.</p></details>"#,
+            escape(computer)
+        ),
+        HostMode::Server => r#"<details id="forgot"><summary>Forgot the password?</summary>
+<p>CineVault can write a one-time PIN to a file on the server. This works from your home network.</p>
+<button type="button" class="secondary" id="pin-start">Make a reset PIN</button>
+<p id="pin-where" role="status"></p>
+<form id="pin-form" hidden>
+<label for="pin">PIN</label>
+<input id="pin" name="pin" inputmode="numeric" autocomplete="one-time-code" required>
+<label for="pin-password">New password</label>
+<input id="pin-password" type="password" autocomplete="new-password" minlength="12" required>
+<label for="pin-confirm">Confirm new password</label>
+<input id="pin-confirm" type="password" autocomplete="new-password" minlength="12" required>
+<p id="pin-error" role="alert"></p>
+<button class="primary" type="submit">Set new password</button>
+</form>
+<p>Or run <code>cinevault-server passwd</code> on the server. Your library, settings and provider keys are kept.</p>
+</details>"#
+            .to_owned(),
+    }
+}
+
+/// The script behind the PIN reset on the headless server's sign-in page.
+const RESET_SCRIPT: &str = r#"
+const start = document.getElementById('pin-start');
+if (start) {
+  const where = document.getElementById('pin-where');
+  const pinForm = document.getElementById('pin-form');
+  start.onclick = async () => {
+    where.textContent = '';
+    const answer = await fetch('/api/reset/start', { method: 'POST' });
+    const body = await answer.json().catch(() => ({ message: 'Could not make a PIN.' }));
+    if (!answer.ok) { where.textContent = body.message; return; }
+    where.textContent = 'Open ' + body.path + ' on the server and enter the PIN below. It works once and expires in 15 minutes. In Docker: docker exec <container> cat /data/password-reset-pin.txt';
+    pinForm.hidden = false;
+    document.getElementById('pin').focus();
+  };
+  pinForm.onsubmit = async (event) => {
+    event.preventDefault();
+    const pinError = document.getElementById('pin-error');
+    pinError.textContent = '';
+    const password = document.getElementById('pin-password').value;
+    const confirm = document.getElementById('pin-confirm').value;
+    if (password !== confirm) { pinError.textContent = 'The passwords do not match.'; return; }
+    const answer = await fetch('/api/reset/finish', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pin: document.getElementById('pin').value, password, confirm }) });
+    if (answer.ok) { location.href = '/'; return; }
+    const body = await answer.json().catch(() => ({ message: 'Could not set the password.' }));
+    pinError.textContent = body.message;
+  };
+}
+"#;
+
+/// The sign-in page. One password field, a show/hide control, Enter submits, and the way back
+/// in when the password is forgotten.
+#[must_use]
+pub fn login_page(plain_http: bool, host: &HostMode) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in to CineVault</title>
+{install}<style>{style}</style></head>
+<body><main>
+<div class="mark">CineVault</div>
+<h1>Sign in</h1>
+{warning}
+<form id="form">
+<label for="password">Password</label>
+<div class="field"><input id="password" name="password" type="password" autocomplete="current-password" autofocus required>
+<button type="button" id="show" aria-label="Show password">Show</button></div>
+<p id="error" role="alert"></p>
+<button class="primary" type="submit">Sign in</button>
+</form>
+{recovery}
+</main>
+<script>
+const form = document.getElementById('form');
+const password = document.getElementById('password');
+const error = document.getElementById('error');
+const show = document.getElementById('show');
+show.onclick = () => {{ const shown = password.type === 'text'; password.type = shown ? 'password' : 'text'; show.textContent = shown ? 'Show' : 'Hide'; }};
+form.onsubmit = async (event) => {{
+  event.preventDefault();
+  error.textContent = '';
+  const answer = await fetch('/api/login', {{ method: 'POST', headers: {{ 'content-type': 'application/json' }}, body: JSON.stringify({{ password: password.value }}) }});
+  if (answer.ok) {{ location.href = {safe_next}; return; }}
+  const body = await answer.json().catch(() => ({{ message: 'Could not sign in.' }}));
+  error.textContent = body.message;
+  password.select();
+}};
+{reset_script}
+</script>
+</body></html>"#,
+        install = INSTALL_HEAD,
+        style = PAGE_STYLE,
+        warning = match host {
+            HostMode::Desktop { .. } if plain_http => DESKTOP_PLAIN_HTTP,
+            _ => plain_http_warning(plain_http),
+        },
+        safe_next = SAFE_NEXT,
+        recovery = recovery(host),
+        reset_script = if *host == HostMode::Server {
+            RESET_SCRIPT
+        } else {
+            ""
+        },
+    )
+}
+
+/// The desktop app has no reverse proxy in front of it; the advice is where to use it.
+const DESKTOP_PLAIN_HTTP: &str = r#"<p class="warn">This connection is not encrypted. Use Browser access on your home network, not on public Wi-Fi.</p>"#;
+
+/// The page a browser from outside the home network gets while no password exists.
+#[must_use]
+pub fn away_page() -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Finish setup from your home network</title>
+{install}<style>{style}</style></head>
+<body><main>
+<div class="mark">CineVault</div>
+<h1>Finish setup from your home network</h1>
+<p class="lead">This server has no password yet. For safety, the password can only be created from a browser on the same computer or the same home network as the server.</p>
+<p class="hint">Or run <code>cinevault-server passwd</code> on the server.</p>
+</main></body></html>"#,
+        install = INSTALL_HEAD,
+        style = PAGE_STYLE
+    )
+}
+
+pub fn setup_page(plain_http: bool) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Welcome to CineVault</title>
+{install}<style>{style}</style></head>
+<body><main>
+<div class="mark">CineVault</div>
+<h1>Welcome</h1>
+<p class="lead">Create the password you will use to open this server from a browser.</p>
+<form id="form">
+<label for="password">Password</label>
+<div class="field"><input id="password" name="password" type="password" autocomplete="new-password" minlength="12" autofocus required>
+<button type="button" id="show" aria-label="Show password">Show</button></div>
+<label for="confirm">Confirm password</label>
+<input id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="12" required>
+<p class="hint">At least 12 characters. A password manager is a good idea.</p>
+<p id="error" role="alert"></p>
+{warning}
+<button class="primary" type="submit">Create password</button>
+</form>
+<p class="warn">Finish setup before making this server reachable from the internet.</p>
+</main>
+<script>
+const form = document.getElementById('form');
+const password = document.getElementById('password');
+const confirm = document.getElementById('confirm');
+const error = document.getElementById('error');
+const show = document.getElementById('show');
+show.onclick = () => {{ const shown = password.type === 'text'; password.type = shown ? 'password' : 'text'; confirm.type = password.type; show.textContent = shown ? 'Show' : 'Hide'; }};
+form.onsubmit = async (event) => {{
+  event.preventDefault();
+  error.textContent = '';
+  if (password.value !== confirm.value) {{ error.textContent = 'The passwords do not match.'; confirm.select(); return; }}
+  const answer = await fetch('/api/setup', {{ method: 'POST', headers: {{ 'content-type': 'application/json' }}, body: JSON.stringify({{ password: password.value, confirm: confirm.value }}) }});
+  if (answer.ok) {{ location.href = {safe_next}; return; }}
+  const body = await answer.json().catch(() => ({{ message: 'Could not set the password.' }}));
+  error.textContent = body.message;
+}};
+</script>
+</body></html>"#,
+        install = INSTALL_HEAD,
+        style = PAGE_STYLE,
+        warning = plain_http_warning(plain_http),
+        safe_next = SAFE_NEXT
+    )
+}
+
+/// Where the page goes after signing in: the `next` address only when it resolves to this
+/// server. A plain prefix check is not enough, because a browser reads `/\host` as `//host`.
+const SAFE_NEXT: &str = "(() => { try { const next = new URLSearchParams(location.search).get('next'); if (!next) return '/'; const target = new URL(next, location.origin); return target.origin === location.origin ? target.pathname + target.search + target.hash : '/'; } catch { return '/'; } })()";
+
+fn plain_http_warning(plain_http: bool) -> &'static str {
+    if plain_http {
+        r#"<p class="warn">This connection is not encrypted. On a network you do not fully trust, put CineVault behind a reverse proxy with HTTPS before signing in.</p>"#
+    } else {
+        ""
+    }
+}
+
+const PAGE_STYLE: &str = r#"
+:root { color-scheme: dark; --bg: #0c0c0e; --surface: #16161a; --line: #2a2a30; --text: #f2f0ea; --muted: #a8a49b; --gold: #d8b45a; --on-gold: #1a1405; --error: #ff8a7a; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 24px; }
+main { width: min(400px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 32px; }
+.mark { color: var(--gold); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; font-size: 12px; }
+h1 { font-size: 28px; margin: 12px 0 4px; }
+p.lead { color: var(--muted); margin: 0 0 20px; }
+label { display: block; font-size: 13px; color: var(--muted); margin: 16px 0 6px; }
+input { width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+input:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
+.field { position: relative; }
+.field input { padding-right: 64px; }
+.field button { position: absolute; right: 6px; top: 6px; height: 32px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font: inherit; }
+button.primary { width: 100%; margin-top: 20px; padding: 12px; border: 0; border-radius: 10px; background: var(--gold); color: var(--on-gold); font: inherit; font-weight: 600; cursor: pointer; }
+button.primary:hover { filter: brightness(1.08); }
+button.secondary { margin-top: 4px; padding: 9px 14px; border: 1px solid var(--line); border-radius: 10px; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+button.secondary:hover { background: var(--bg); }
+button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+p.hint, details, p.warn { color: var(--muted); font-size: 13px; }
+p.warn { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 16px; }
+#error { color: var(--error); min-height: 1.5em; margin: 10px 0 0; }
+details { margin-top: 20px; }
+code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+@media (max-width: 420px) { main { padding: 22px; border: 0; background: transparent; } }
+@media (prefers-color-scheme: light) {
+  :root { color-scheme: light; --bg: #f2f1ee; --surface: #fbfaf8; --line: rgba(0, 0, 0, 0.08); --text: #1a1a19; --muted: #666561; --gold: #7a6438; --on-gold: #f2f1ee; --error: #a82533; }
+}
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GOOD: &str = "a long enough password";
+
+    fn auth() -> (tempfile::TempDir, Auth) {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Auth::open(dir.path()).unwrap();
+        (dir, auth)
+    }
+
+    fn with_password() -> (tempfile::TempDir, Auth) {
+        let (dir, auth) = auth();
+        let claim = auth.claim_setup(None).unwrap();
+        auth.set_password(GOOD, GOOD, &claim, "192.168.1.30", "Test")
+            .unwrap();
+        (dir, auth)
+    }
+
+    fn read_pin(dir: &tempfile::TempDir) -> String {
+        let text = std::fs::read_to_string(dir.path().join(PIN_FILE)).unwrap();
+        text.split("PIN: ")
+            .nth(1)
+            .unwrap()
+            .chars()
+            .take(8)
+            .collect()
+    }
+
+    /// A password file written by CineVault 1.6 (argon2 0.5, `hash_password` above) must keep
+    /// signing in after any upgrade of the hashing crate, or every browser user is locked out.
+    const OLDER_PASSWORD: &str = "an older password hashed by argon2 0.5";
+    const OLDER_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$V8iKXGAxANC3ZlalQIgR2A$axkHzt952A+2DjNgDEOZnSludtIBWr6jnTzSz+pLNCI";
+
+    #[test]
+    fn a_password_hashed_by_an_earlier_version_still_verifies() {
+        assert!(verify_hash(OLDER_HASH, OLDER_PASSWORD));
+        assert!(!verify_hash(OLDER_HASH, "a different long password"));
+    }
+
+    #[test]
+    fn new_hashes_keep_the_same_algorithm_and_parameters() {
+        let file = hash_password(GOOD).unwrap();
+        assert!(
+            file.hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+            "{}",
+            file.hash
+        );
+        // A 16-byte salt and a 32-byte hash, in unpadded base64.
+        let parts: Vec<&str> = file.hash.split('$').collect();
+        assert_eq!(parts.len(), 6, "{}", file.hash);
+        assert_eq!(parts[4].len(), 22, "{}", file.hash);
+        assert_eq!(parts[5].len(), 43, "{}", file.hash);
+        assert!(verify_hash(&file.hash, GOOD));
+    }
+
+    #[test]
+    fn a_new_folder_opens_the_welcome_page() {
+        let (_dir, auth) = auth();
+        assert!(auth.needs_setup());
+        assert!(!auth.has_password());
+    }
+
+    #[test]
+    fn the_welcome_page_has_no_time_limit() {
+        let (_dir, auth) = auth();
+        let later = Instant::now() + Duration::from_secs(2 * 60 * 60);
+        assert!(auth.needs_setup());
+        assert!(auth.claim_setup_at(None, later).is_ok());
+    }
+
+    #[test]
+    fn a_second_browser_is_refused_until_the_claim_lapses() {
+        let (_dir, auth) = auth();
+        let now = Instant::now();
+        let first = auth.claim_setup_at(None, now).unwrap();
+        assert!(matches!(
+            auth.claim_setup_at(None, now + Duration::from_secs(60)),
+            Err(AuthError::SetupClaimed)
+        ));
+        // The first browser keeps its claim alive by using it.
+        assert_eq!(
+            auth.claim_setup_at(Some(&first), now + Duration::from_secs(20 * 60))
+                .unwrap(),
+            first
+        );
+        assert!(matches!(
+            auth.claim_setup_at(None, now + Duration::from_secs(40 * 60)),
+            Err(AuthError::SetupClaimed)
+        ));
+        let second = auth
+            .claim_setup_at(None, now + Duration::from_secs(51 * 60))
+            .unwrap();
+        assert_ne!(first, second);
+        assert!(matches!(
+            auth.set_password(GOOD, GOOD, &first, "a", "b"),
+            Err(AuthError::SetupClaimed)
+        ));
+        assert!(auth.set_password(GOOD, GOOD, &second, "a", "b").is_ok());
+    }
+
+    #[test]
+    fn the_desktop_never_shows_the_welcome_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Auth::open_as(
+            dir.path(),
+            HostMode::Desktop {
+                computer: "STUDY-PC".into(),
+            },
+        )
+        .unwrap();
+        assert!(!auth.needs_setup());
+        assert!(matches!(auth.claim_setup(None), Err(AuthError::AlreadySet)));
+        assert!(matches!(
+            auth.start_reset(),
+            Err(AuthError::DesktopReset(name)) if name == "STUDY-PC"
+        ));
+        assert!(!dir.path().join(PIN_FILE).exists());
+        let page = login_page(false, auth.host());
+        assert!(page.contains("Change it in CineVault's Settings on STUDY-PC."));
+        assert!(!page.contains("/api/reset/start"));
+    }
+
+    #[test]
+    fn the_computer_name_is_escaped_on_the_sign_in_page() {
+        let page = login_page(
+            false,
+            &HostMode::Desktop {
+                computer: "<script>x</script>".into(),
+            },
+        );
+        assert!(!page.contains("<script>x</script>"));
+        assert!(page.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn a_short_password_is_refused() {
+        let (_dir, auth) = auth();
+        let claim = auth.claim_setup(None).unwrap();
+        assert!(matches!(
+            auth.set_password("short", "short", &claim, "a", "b"),
+            Err(AuthError::TooShort)
+        ));
+    }
+
+    #[test]
+    fn a_mismatched_confirmation_is_refused() {
+        let (_dir, auth) = auth();
+        let claim = auth.claim_setup(None).unwrap();
+        assert!(matches!(
+            auth.set_password(GOOD, "another long password", &claim, "a", "b"),
+            Err(AuthError::Mismatch)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_password_is_hashed_and_signs_in() {
+        let (dir, auth) = with_password();
+        assert!(!auth.needs_setup());
+        let saved = std::fs::read_to_string(dir.path().join(AUTH_FILE)).unwrap();
+        assert!(saved.contains("$argon2"));
+        assert!(!saved.contains(GOOD));
+        let (again, session) = auth.login(GOOD, "127.0.0.1", "Edge", true).await.unwrap();
+        assert!(auth.session(&again).is_some());
+        assert!(!session.csrf.is_empty());
+        assert_ne!(session.handle, again);
+    }
+
+    #[tokio::test]
+    async fn a_wrong_password_is_refused_and_rate_limited() {
+        let (_dir, auth) = with_password();
+        for _ in 0..5 {
+            assert!(matches!(
+                auth.login("wrong password", "127.0.0.1", "", true).await,
+                Err(AuthError::WrongPassword)
+            ));
+        }
+        assert!(matches!(
+            auth.login(GOOD, "127.0.0.1", "", true).await,
+            Err(AuthError::TooManyAttempts)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_right_password_after_four_wrong_ones_signs_in() {
+        let (_dir, auth) = with_password();
+        for _ in 0..4 {
+            assert!(
+                auth.login("wrong password", "203.0.113.7", "", false)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(auth.login(GOOD, "203.0.113.7", "", false).await.is_ok());
+        // The address starts afresh.
+        assert!(Auth::lock(&auth.failures).per_client.is_empty());
+    }
+
+    /// A flood from many public addresses reaches the global ceiling. The owner at home still
+    /// signs in; a new public address is refused without a check.
+    #[tokio::test]
+    async fn a_flood_from_the_internet_does_not_lock_out_the_home_network() {
+        let (_dir, auth) = with_password();
+        {
+            let now = Instant::now();
+            let mut failures = Auth::lock(&auth.failures);
+            for n in 0..MAX_GLOBAL_FAILURES {
+                failures.record(&format!("198.51.100.{}", n % 250), now);
+            }
+        }
+        assert!(auth.login(GOOD, "192.168.1.30", "", true).await.is_ok());
+        assert!(matches!(
+            auth.login(GOOD, "203.0.113.7", "", false).await,
+            Err(AuthError::TooManyAttempts)
+        ));
+    }
+
+    /// Ten wrong attempts at once from one address: five are checked, the rest refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_attempts_cannot_slip_past_the_limit() {
+        let (_dir, auth) = with_password();
+        let auth = std::sync::Arc::new(auth);
+        let mut attempts = tokio::task::JoinSet::new();
+        for _ in 0..10 {
+            let auth = std::sync::Arc::clone(&auth);
+            attempts
+                .spawn(async move { auth.login("wrong password", "203.0.113.7", "", false).await });
+        }
+        let (mut checked, mut refused) = (0, 0);
+        while let Some(result) = attempts.join_next().await {
+            match result.unwrap() {
+                Err(AuthError::WrongPassword) => checked += 1,
+                Err(AuthError::TooManyAttempts) => refused += 1,
+                other => panic!("unexpected {:?}", other.map(|_| ())),
+            }
+        }
+        assert_eq!((checked, refused), (MAX_FAILURES, 10 - MAX_FAILURES));
+    }
+
+    /// While a check waits or runs, another address is answered: the failures lock is not held.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_failures_lock_is_free_during_a_check() {
+        let (_dir, auth) = with_password();
+        let auth = std::sync::Arc::new(auth);
+        {
+            let now = Instant::now();
+            let mut failures = Auth::lock(&auth.failures);
+            for _ in 0..MAX_FAILURES {
+                failures.record("203.0.113.9", now);
+            }
+        }
+        // Every check permit is taken, so the next check waits.
+        let held = auth.checks.acquire_many(MAX_CHECKS as u32).await.unwrap();
+        let waiting = tokio::spawn({
+            let auth = std::sync::Arc::clone(&auth);
+            async move { auth.login(GOOD, "192.168.1.30", "", true).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let other = tokio::time::timeout(
+            Duration::from_secs(2),
+            auth.login(GOOD, "203.0.113.9", "", false),
+        )
+        .await
+        .expect("another address is answered while a check is pending");
+        assert!(matches!(other, Err(AuthError::TooManyAttempts)));
+        assert!(!waiting.is_finished());
+        drop(held);
+        assert!(waiting.await.unwrap().is_ok());
+    }
+
+    /// `cinevault-server passwd` writes the file while the server runs; the running server
+    /// accepts the new password at once and refuses the old one.
+    #[tokio::test]
+    async fn a_password_set_on_the_command_line_works_without_a_restart() {
+        let (dir, auth) = with_password();
+        let command_line = Auth::open(dir.path()).unwrap();
+        command_line
+            .set_password_unattended("the second long password")
+            .unwrap();
+        assert!(
+            auth.login("the second long password", "a", "", true)
+                .await
+                .is_ok()
+        );
+        assert!(auth.login(GOOD, "b", "", true).await.is_err());
+    }
+
+    #[test]
+    fn the_sign_in_pages_only_return_to_this_server() {
+        for page in [login_page(false, &HostMode::Server), setup_page(false)] {
+            assert!(page.contains("target.origin === location.origin"));
+            assert!(!page.contains("startsWith('//')"));
+        }
+    }
+
+    #[test]
+    fn every_server_page_can_install_the_app() {
+        let desktop = HostMode::Desktop {
+            computer: "STUDY-PC".to_owned(),
+        };
+        for page in [
+            login_page(true, &HostMode::Server),
+            login_page(false, &desktop),
+            setup_page(false),
+            away_page(),
+        ] {
+            let head = page.split("</head>").next().unwrap();
+            assert!(head.contains(INSTALL_HEAD));
+            assert!(head.contains(r#"rel="manifest" href="/manifest.webmanifest""#));
+        }
+    }
+
+    #[tokio::test]
+    async fn sign_out_ends_the_session() {
+        let (_dir, auth) = with_password();
+        let (id, _) = auth.login(GOOD, "a", "", true).await.unwrap();
+        auth.logout(&id);
+        assert!(auth.session(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn sessions_are_listed_and_signed_out_by_handle() {
+        let (_dir, auth) = with_password();
+        auth.logout_all_except(None);
+        let (first, one) = auth
+            .login(GOOD, "192.168.1.30", "Phone browser", true)
+            .await
+            .unwrap();
+        let (second, _) = auth
+            .login(GOOD, "192.168.1.31", "TV browser", true)
+            .await
+            .unwrap();
+        let list = auth.sessions();
+        assert_eq!(list.len(), 2);
+        assert!(
+            list.iter()
+                .any(|s| s.address == "192.168.1.30" && s.agent == "Phone browser")
+        );
+        assert!(list.iter().all(|s| s.handle != first && s.handle != second));
+        assert_eq!(auth.logout_handle(&one.handle), Some(session_key(&first)));
+        assert!(auth.session(&first).is_none());
+        assert!(auth.session(&second).is_some());
+        assert_eq!(auth.logout_handle("unknown"), None);
+    }
+
+    #[tokio::test]
+    async fn the_sessions_are_kept_by_a_hash_of_the_cookie() {
+        let (_dir, auth) = with_password();
+        let (id, _) = auth.login(GOOD, "a", "", true).await.unwrap();
+        let sessions = Auth::lock(&auth.sessions);
+        assert!(!sessions.map.contains_key(&id));
+        assert!(sessions.map.contains_key(&session_key(&id)));
+        assert!(sessions.map.keys().all(|key| key.len() == 64 && *key != id));
+    }
+
+    #[tokio::test]
+    async fn a_session_survives_a_restart() {
+        let (dir, auth) = with_password();
+        let (id, session) = auth
+            .login(GOOD, "192.168.1.30", "Phone", true)
+            .await
+            .unwrap();
+        drop(auth);
+        let again = Auth::open(dir.path()).unwrap();
+        let kept = again.session(&id).expect("still signed in");
+        assert_eq!(kept.csrf, session.csrf);
+        assert_eq!(kept.handle, session.handle);
+        assert_eq!(kept.address, "192.168.1.30");
+    }
+
+    #[tokio::test]
+    async fn the_sessions_file_holds_no_cookie() {
+        let (dir, auth) = with_password();
+        let (id, _) = auth.login(GOOD, "a", "", true).await.unwrap();
+        let text = std::fs::read_to_string(dir.path().join(SESSIONS_FILE)).unwrap();
+        assert!(!text.contains(&id));
+        assert!(text.contains(&session_key(&id)));
+    }
+
+    /// `cinevault-server passwd` (or `passwd --reset`) while the server is stopped: the next
+    /// start signs every earlier session out.
+    #[tokio::test]
+    async fn a_password_changed_while_stopped_ends_every_session() {
+        let (dir, auth) = with_password();
+        let (id, _) = auth.login(GOOD, "a", "", true).await.unwrap();
+        drop(auth);
+        let changed = serde_json::to_vec(&hash_password("the second long password").unwrap());
+        std::fs::write(dir.path().join(AUTH_FILE), changed.unwrap()).unwrap();
+        let again = Auth::open(dir.path()).unwrap();
+        assert!(again.session(&id).is_none());
+        assert_eq!(again.live_sessions(), 0);
+
+        let (id, _) = again
+            .login("the second long password", "a", "", true)
+            .await
+            .unwrap();
+        drop(again);
+        std::fs::remove_file(dir.path().join(AUTH_FILE)).unwrap();
+        let cleared = Auth::open(dir.path()).unwrap();
+        assert!(cleared.session(&id).is_none());
+    }
+
+    /// The desktop's Settings or `cinevault-server passwd` change the password while the server
+    /// runs: the running server ends its sessions when it reads the new password.
+    #[tokio::test]
+    async fn a_password_changed_elsewhere_ends_the_running_sessions() {
+        let (dir, auth) = with_password();
+        let (id, _) = auth.login(GOOD, "a", "", true).await.unwrap();
+        Auth::open(dir.path())
+            .unwrap()
+            .set_password_unattended("the second long password")
+            .unwrap();
+        assert!(auth.has_password());
+        assert!(auth.session(&id).is_none());
+    }
+
+    /// A password change from a session keeps that session, also across a restart, and ends
+    /// the others.
+    #[tokio::test]
+    async fn a_password_change_keeps_only_the_session_that_made_it() {
+        let (dir, auth) = with_password();
+        let (mine, _) = auth.login(GOOD, "a", "", true).await.unwrap();
+        let (other, _) = auth.login(GOOD, "b", "", true).await.unwrap();
+        let new = "the second long password";
+        auth.change_password(GOOD, new, new).await.unwrap();
+        auth.logout_all_except(Some(&mine));
+        drop(auth);
+        let again = Auth::open(dir.path()).unwrap();
+        assert!(again.session(&mine).is_some());
+        assert!(again.session(&other).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_expired_session_is_dropped_on_load() {
+        let (dir, auth) = with_password();
+        let (old, _) = auth.login(GOOD, "a", "", true).await.unwrap();
+        let (fresh, _) = auth.login(GOOD, "b", "", true).await.unwrap();
+        {
+            let mut sessions = Auth::lock(&auth.sessions);
+            let session = sessions.map.get_mut(&session_key(&old)).unwrap();
+            session.last_used = SystemTime::now() - SESSION_IDLE + Duration::from_secs(1);
+            session.signed_in = session.last_used;
+            sessions.used = true;
+        }
+        // Written while still inside the lifetime, read once it has passed.
+        auth.flush();
+        let text = std::fs::read_to_string(dir.path().join(SESSIONS_FILE)).unwrap();
+        assert!(text.contains(&session_key(&old)));
+        std::thread::sleep(Duration::from_millis(1100));
+        drop(auth);
+        let again = Auth::open(dir.path()).unwrap();
+        assert!(again.session(&old).is_none());
+        assert!(again.session(&fresh).is_some());
+        let text = std::fs::read_to_string(dir.path().join(SESSIONS_FILE)).unwrap();
+        assert!(!text.contains(&session_key(&old)));
+    }
+
+    #[test]
+    fn a_damaged_sessions_file_is_set_aside() {
+        let (dir, _auth) = with_password();
+        let path = dir.path().join(SESSIONS_FILE);
+        for damaged in ["not json", r#"{"version":9,"password":"","sessions":[]}"#] {
+            std::fs::write(&path, damaged).unwrap();
+            let auth = Auth::open(dir.path()).unwrap();
+            assert_eq!(auth.live_sessions(), 0);
+            assert!(auth.has_password());
+            let aside = dir.path().join(format!("{SESSIONS_FILE}.bad"));
+            assert_eq!(std::fs::read_to_string(aside).unwrap(), damaged);
+            assert!(!path.exists());
+        }
+    }
+
+    /// Uses are written at most every five minutes; a sign-in is written at once.
+    #[tokio::test]
+    async fn uses_are_written_now_and_then() {
+        let (dir, auth) = with_password();
+        let (id, _) = auth.login(GOOD, "a", "", true).await.unwrap();
+        let path = dir.path().join(SESSIONS_FILE);
+        let signed_in = std::fs::read(&path).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let used = auth.session(&id).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), signed_in);
+        let Some(earlier) = Instant::now().checked_sub(USES_WRITTEN_EVERY) else {
+            return;
+        };
+        Auth::lock(&auth.sessions).written = earlier;
+        let again = auth.session(&id).unwrap();
+        assert!(again.last_used >= used.last_used);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(&millis(again.last_used).to_string()));
+    }
+
+    #[test]
+    fn the_session_cap_evicts_the_oldest() {
+        let (_dir, auth) = with_password();
+        auth.logout_all_except(None);
+        let ids: Vec<String> = (0..33)
+            .map(|n| auth.create_session(&format!("10.0.0.{n}"), "").0)
+            .collect();
+        assert_eq!(auth.live_sessions(), 32);
+        assert!(!auth.is_live(&ids[0]));
+        assert!(auth.is_live(&ids[32]));
+    }
+
+    #[test]
+    fn a_damaged_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(AUTH_FILE), "not json").unwrap();
+        assert!(matches!(Auth::open(dir.path()), Err(AuthError::Damaged)));
+    }
+
+    #[tokio::test]
+    async fn a_reset_pin_is_written_to_a_file_and_signs_everyone_else_out() {
+        let (dir, auth) = with_password();
+        let (old, _) = auth.login(GOOD, "a", "", true).await.unwrap();
+        let started = auth.start_reset().unwrap();
+        assert!(started.created);
+        assert_eq!(started.path, dir.path().join(PIN_FILE));
+        let pin = read_pin(&dir);
+        assert_eq!(pin.len(), 8);
+        assert!(pin.chars().all(|c| c.is_ascii_digit()));
+        let (id, _) = auth
+            .finish_reset(
+                &pin,
+                "a brand new password",
+                "a brand new password",
+                "b",
+                "",
+            )
+            .unwrap();
+        assert!(auth.session(&id).is_some());
+        assert!(auth.session(&old).is_none());
+        assert!(!dir.path().join(PIN_FILE).exists());
+        assert!(
+            auth.login("a brand new password", "c", "", true)
+                .await
+                .is_ok()
+        );
+        assert!(auth.login(GOOD, "d", "", true).await.is_err());
+        // The PIN works once.
+        assert!(matches!(
+            auth.finish_reset(
+                &pin,
+                "a third long password",
+                "a third long password",
+                "e",
+                ""
+            ),
+            Err(AuthError::NoPin)
+        ));
+    }
+
+    #[test]
+    fn asking_again_keeps_the_same_pin() {
+        let (dir, auth) = with_password();
+        assert!(auth.start_reset().unwrap().created);
+        let pin = read_pin(&dir);
+        let again = auth.start_reset().unwrap();
+        assert!(!again.created);
+        assert_eq!(read_pin(&dir), pin);
+    }
+
+    #[test]
+    fn five_wrong_pins_void_it() {
+        let (dir, auth) = with_password();
+        auth.start_reset().unwrap();
+        let pin = read_pin(&dir);
+        let wrong = if pin == "00000000" {
+            "00000001"
+        } else {
+            "00000000"
+        };
+        for left in (1..5).rev() {
+            assert!(matches!(
+                auth.finish_reset(wrong, GOOD, GOOD, "a", ""),
+                Err(AuthError::WrongPin(n)) if n == left
+            ));
+        }
+        assert!(matches!(
+            auth.finish_reset(wrong, GOOD, GOOD, "a", ""),
+            Err(AuthError::PinVoid)
+        ));
+        assert!(!dir.path().join(PIN_FILE).exists());
+        assert!(matches!(
+            auth.finish_reset(
+                &pin,
+                "a brand new password",
+                "a brand new password",
+                "a",
+                ""
+            ),
+            Err(AuthError::NoPin)
+        ));
+        // A new PIN only after a minute.
+        assert!(matches!(auth.start_reset(), Err(AuthError::ResetTooSoon)));
+        let later = Instant::now() + Duration::from_secs(61);
+        assert!(auth.start_reset_at(later).unwrap().created);
+    }
+
+    #[tokio::test]
+    async fn an_expired_pin_is_refused_and_its_file_deleted() {
+        let (dir, auth) = with_password();
+        let now = Instant::now();
+        auth.start_reset_at(now).unwrap();
+        let pin = read_pin(&dir);
+        let later = now + PIN_LIFETIME + Duration::from_secs(60);
+        assert!(matches!(
+            auth.finish_reset_at(
+                &pin,
+                "a brand new password",
+                "a brand new password",
+                "a",
+                "",
+                later
+            ),
+            Err(AuthError::NoPin)
+        ));
+        assert!(!dir.path().join(PIN_FILE).exists());
+        assert!(auth.login(GOOD, "a", "", true).await.is_ok());
+    }
+
+    #[test]
+    fn a_short_new_password_does_not_spend_the_pin() {
+        let (dir, auth) = with_password();
+        auth.start_reset().unwrap();
+        let pin = read_pin(&dir);
+        assert!(matches!(
+            auth.finish_reset(&pin, "short", "short", "a", ""),
+            Err(AuthError::TooShort)
+        ));
+        assert!(matches!(
+            auth.finish_reset(
+                &pin,
+                "a brand new password",
+                "another new password",
+                "a",
+                ""
+            ),
+            Err(AuthError::Mismatch)
+        ));
+        assert!(
+            auth.finish_reset(
+                &pin,
+                "a brand new password",
+                "a brand new password",
+                "a",
+                ""
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_pin_left_by_an_earlier_run_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(PIN_FILE),
+            "CineVault password reset PIN: 12345678",
+        )
+        .unwrap();
+        let _auth = Auth::open(dir.path()).unwrap();
+        assert!(!dir.path().join(PIN_FILE).exists());
+    }
+
+    #[test]
+    fn pins_are_eight_digits() {
+        for _ in 0..200 {
+            let pin = random_pin();
+            assert_eq!(pin.len(), 8);
+            assert!(pin.chars().all(|c| c.is_ascii_digit()));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_password_and_pin_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, auth) = with_password();
+        auth.start_reset().unwrap();
+        for name in [AUTH_FILE, PIN_FILE, SESSIONS_FILE] {
+            let mode = std::fs::metadata(dir.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_password_set_from_the_command_line_keeps_the_folder_owner() {
+        use std::os::unix::fs::MetadataExt as _;
+        let (dir, auth) = auth();
+        auth.set_password_unattended("a long enough password")
+            .unwrap();
+        let file = dir.path().join(AUTH_FILE);
+        give_to_folder_owner(&file, dir.path());
+        let (file_meta, folder_meta) = (
+            std::fs::metadata(&file).unwrap(),
+            std::fs::metadata(dir.path()).unwrap(),
+        );
+        assert_eq!(file_meta.uid(), folder_meta.uid());
+        assert_eq!(file_meta.gid(), folder_meta.gid());
+        assert!(auth.check_password_blocking("a long enough password"));
+    }
+}

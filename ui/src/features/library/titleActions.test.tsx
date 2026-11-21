@@ -1,0 +1,362 @@
+import {
+  RouterProvider,
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+} from "@tanstack/react-router";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { ContextMenu } from "../../components/ContextMenu";
+import { restorePlatform, stubPlatform } from "../../test/platform";
+import { LibrarySelectionBar } from "./LibrarySelectionBar";
+import { TitleContextMenu } from "./TitleContextMenu";
+import {
+  BAR_ORDER,
+  HEADER_ORDER,
+  MENU_GROUPS,
+  MORE_ORDER,
+  TITLE_ACTIONS,
+  fullLabel,
+} from "./titleActions";
+import { useSettingsStore } from "../settings/settingsStore";
+import { setLibraryOpsBackend } from "../library-ops/libraryOpsBackend";
+import { createSyntheticLibraryOpsBackend } from "../library-ops/syntheticLibraryOps";
+import { useToastStore } from "../toasts/toastStore";
+import { setEditBackend } from "../edit/editBackend";
+import type { EditBackend, TitleChoice } from "../edit/editBackend";
+import { useLibraryActions } from "./useLibraryActions";
+import type { TitleTarget } from "./useLibraryActions";
+
+const target = (id: string, title: string, copies = 0): TitleTarget => ({
+  id,
+  kind: "movie",
+  title,
+  folder: `D:/Movies/${title}`,
+  filesMissing: false,
+  copies,
+});
+
+function Page({
+  targets,
+  promoteRemove = false,
+}: {
+  targets: readonly TitleTarget[];
+  promoteRemove?: boolean;
+}) {
+  const actions = useLibraryActions(targets);
+  return (
+    <div>
+      <ContextMenu menu={<TitleContextMenu actions={actions} />}>
+        <div data-testid="area">area</div>
+      </ContextMenu>
+      <LibrarySelectionBar
+        actions={actions}
+        count={targets.length}
+        size="186.2 GB"
+        promoteRemove={promoteRemove}
+        onClear={() => undefined}
+      />
+    </div>
+  );
+}
+
+async function renderPage(targets: readonly TitleTarget[], promoteRemove = false) {
+  const root = createRootRoute();
+  const router = createRouter({
+    routeTree: root.addChildren([
+      createRoute({
+        getParentRoute: () => root,
+        path: "/",
+        component: () => <Page targets={targets} promoteRemove={promoteRemove} />,
+      }),
+      createRoute({
+        getParentRoute: () => root,
+        path: "/movies/$movieId/copies",
+        component: () => <p>Compare page</p>,
+      }),
+    ]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  render(<RouterProvider router={router} />);
+  await screen.findByRole("toolbar", { name: "Bulk actions" });
+  return router;
+}
+
+const four = [target("1", "Heat"), target("2", "Alien"), target("3", "Dune"), target("4", "Jaws")];
+
+const names = (items: HTMLElement[]) => items.map((item) => item.textContent?.trim() ?? "");
+
+beforeEach(() => stubPlatform("windows"));
+afterEach(() => {
+  restorePlatform();
+  setLibraryOpsBackend(null);
+  setEditBackend(null);
+  useToastStore.setState({ toasts: [], history: [] });
+});
+
+describe("the name of Delete", () => {
+  it("says Delete on every platform, because Settings › Deleted files decides where it goes", () => {
+    expect(fullLabel("delete", 1)).toBe("Delete");
+    stubPlatform("linux");
+    expect(fullLabel("delete", 1)).toBe("Delete");
+  });
+});
+
+describe("title actions", () => {
+  it("lists the bar as Rename, Scrape, Artwork, Move, Delete and More with the count and size", async () => {
+    await renderPage(four);
+    const bar = screen.getByRole("toolbar", { name: "Bulk actions" });
+    expect(within(bar).getByText("4 selected")).toBeInTheDocument();
+    expect(within(bar).getByText("186.2 GB")).toBeInTheDocument();
+    const buttons = within(bar)
+      .getAllByRole("button")
+      .map((b) => b.textContent?.trim());
+    expect(buttons).toEqual(["Rename", "Scrape", "Artwork", "Move", "Delete", "More", ""]);
+  });
+
+  it("keeps the bar, More and the menu in the one order, with the same names", async () => {
+    const user = userEvent.setup();
+    await renderPage(four);
+    const bar = screen.getByRole("toolbar", { name: "Bulk actions" });
+
+    await user.click(within(bar).getByRole("button", { name: "More" }));
+    const more = await screen.findAllByRole("menuitem");
+    const moreNames = names(more);
+    expect(moreNames).toEqual([
+      "Rewrite NFO",
+      "Reload media info",
+      "Edit details",
+      "Use original title for 4 titles",
+      "Use localized title for 4 titles",
+      "Remove from library (keep files)",
+      "Ignore this folder",
+    ]);
+    expect(more).toHaveLength(MORE_ORDER.length);
+    await user.keyboard("{Escape}");
+
+    await user.pointer({ target: screen.getByTestId("area"), keys: "[MouseRight]" });
+    const menu = await screen.findAllByRole("menuitem");
+    const menuNames = names(menu);
+    expect(menuNames).toEqual([
+      "OpenEnter",
+      "Play",
+      "Open folder",
+      "Rename 4 titlesF2",
+      "Scrape 4 titles",
+      "Artwork…",
+      "Move to…",
+      "Rewrite NFO",
+      "Reload media info",
+      "Edit details",
+      "Use original title for 4 titles",
+      "Use localized title for 4 titles",
+      "Remove from library (keep files)",
+      "Ignore this folder",
+      "DeleteDel",
+    ]);
+    // Every action of the bar and of More is in the menu, once; Compare only for one movie that
+    // has copies.
+    expect(menu).toHaveLength(MENU_GROUPS.flat().length - 1);
+    for (const id of [...BAR_ORDER, ...MORE_ORDER]) expect(MENU_GROUPS.flat()).toContain(id);
+  });
+
+  it("says why an action that works on one title is unavailable for several", async () => {
+    const user = userEvent.setup();
+    await renderPage(four);
+    await user.pointer({ target: screen.getByTestId("area"), keys: "[MouseRight]" });
+    await screen.findAllByRole("menuitem");
+    expect(document.querySelector('[data-action="open"]')).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("names one title without a count and enables Open", async () => {
+    const user = userEvent.setup();
+    await renderPage([target("1", "Heat")]);
+    await user.pointer({ target: screen.getByTestId("area"), keys: "[MouseRight]" });
+    expect(await screen.findByRole("menuitem", { name: /^Rename/ })).toHaveTextContent(
+      /^RenameF2$/,
+    );
+    expect(screen.getByRole("menuitem", { name: /^Scrape$/ })).toBeInTheDocument();
+    expect(document.querySelector('[data-action="open"]')).not.toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+  });
+
+  it("offers Compare 2 copies with the title actions for one movie with copies", async () => {
+    const user = userEvent.setup();
+    const router = await renderPage([target("1", "Heat", 2)]);
+    await user.pointer({ target: screen.getByTestId("area"), keys: "[MouseRight]" });
+    const menu = await screen.findAllByRole("menuitem");
+    const labels = names(menu);
+
+    const compare = labels.indexOf("Compare 2 copies");
+    expect(compare).toBe(3);
+    // In the group of title actions, before the separator; never next to Delete.
+    expect(labels.findIndex((label) => label.startsWith("Rename"))).toBeGreaterThan(compare);
+    expect(labels.at(-1)).toBe("DeleteDel");
+    await user.click(screen.getByRole("menuitem", { name: "Compare 2 copies" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/movies/1/copies"));
+  });
+
+  it("leaves Compare out for several titles and for a movie without copies", async () => {
+    const user = userEvent.setup();
+    await renderPage([target("1", "Heat", 2), target("2", "Alien", 2)]);
+    await user.pointer({ target: screen.getByTestId("area"), keys: "[MouseRight]" });
+    await screen.findAllByRole("menuitem");
+    expect(screen.queryByRole("menuitem", { name: /^Compare/ })).toBeNull();
+    await user.keyboard("{Escape}");
+  });
+
+  it("leaves Rename and Move out while Metadata only is on", async () => {
+    const user = userEvent.setup();
+    useSettingsStore.setState({ values: { "renamer.metadata-only": true }, status: "ready" });
+    await renderPage(four);
+    const bar = screen.getByRole("toolbar", { name: "Bulk actions" });
+    const buttons = within(bar)
+      .getAllByRole("button")
+      .map((b) => b.textContent?.trim());
+    expect(buttons).toEqual(["Scrape", "Artwork", "Delete", "More", ""]);
+    await user.pointer({ target: screen.getByTestId("area"), keys: "[MouseRight]" });
+    await screen.findAllByRole("menuitem");
+    expect(screen.queryByRole("menuitem", { name: /^Rename/ })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /^Move/ })).toBeNull();
+    await user.keyboard("{Escape}");
+    useSettingsStore.setState({ values: {}, status: "ready" });
+  });
+
+  it("leaves Compare out for a movie that has no copy", async () => {
+    const user = userEvent.setup();
+    await renderPage([target("1", "Heat")]);
+    await user.pointer({ target: screen.getByTestId("area"), keys: "[MouseRight]" });
+    await screen.findAllByRole("menuitem");
+    expect(screen.queryByRole("menuitem", { name: /^Compare/ })).toBeNull();
+  });
+
+  it("keeps Remove from library under More in the usual view", async () => {
+    await renderPage(four);
+    const bar = screen.getByRole("toolbar", { name: "Bulk actions" });
+    expect(within(bar).queryByRole("button", { name: "Remove from library" })).toBeNull();
+  });
+
+  it("puts Remove from library on the bar before Delete in the missing-files view, and removes every selected title in one call", async () => {
+    const user = userEvent.setup();
+    const ops = createSyntheticLibraryOpsBackend();
+    const removeFromLibrary = vi.spyOn(ops, "removeFromLibrary");
+    setLibraryOpsBackend(ops);
+    await renderPage(four, true);
+    const bar = screen.getByRole("toolbar", { name: "Bulk actions" });
+    const buttons = within(bar)
+      .getAllByRole("button")
+      .map((b) => b.textContent?.trim());
+    expect(buttons).toEqual([
+      "Rename",
+      "Scrape",
+      "Artwork",
+      "Move",
+      "Remove from library",
+      "Delete",
+      "More",
+      "",
+    ]);
+
+    // It is on the bar, so it is not repeated under More.
+    await user.click(within(bar).getByRole("button", { name: "More" }));
+    expect(names(await screen.findAllByRole("menuitem"))).toEqual([
+      "Rewrite NFO",
+      "Reload media info",
+      "Edit details",
+      "Use original title for 4 titles",
+      "Use localized title for 4 titles",
+      "Ignore this folder",
+    ]);
+    await user.keyboard("{Escape}");
+
+    await user.click(within(bar).getByRole("button", { name: "Remove from library" }));
+    await waitFor(() => expect(removeFromLibrary).toHaveBeenCalledTimes(1));
+    expect(removeFromLibrary).toHaveBeenCalledWith(["1", "2", "3", "4"], false);
+    await waitFor(() =>
+      expect(useToastStore.getState().toasts[0]?.message).toContain("Removed 4 titles"),
+    );
+  });
+
+  it("shares icons, names and hints with the title page header", () => {
+    // The page header reads the same list: its six buttons exist in the registry.
+    for (const id of HEADER_ORDER) expect(TITLE_ACTIONS[id].icon).toBeDefined();
+    expect(HEADER_ORDER).toEqual(["play", "scrape", "rename", "move", "open-folder", "artwork"]);
+    expect(TITLE_ACTIONS.rename.hint).toBe("F2");
+    expect(TITLE_ACTIONS.delete.hint).toBe("Del");
+  });
+});
+
+describe("the title choice under More", () => {
+  /** An edit backend whose titles "1" and "3" have another original title. */
+  function choiceBackend() {
+    const calls: { ids: string[]; original: boolean }[] = [];
+    const answer = (ids: readonly string[]): TitleChoice => {
+      const changed = ids.filter((id) => id === "1" || id === "3");
+      return { changed, unchanged: ids.length - changed.length, nfo_problem: null };
+    };
+    const backend = {
+      setTitleChoice: (ids: readonly string[], original: boolean) => {
+        calls.push({ ids: [...ids], original });
+        return Promise.resolve(answer(ids));
+      },
+    } as unknown as EditBackend;
+    setEditBackend(backend);
+    return calls;
+  }
+
+  it("uses the original title of the selected titles and offers Undo for the ones that changed", async () => {
+    const user = userEvent.setup();
+    const calls = choiceBackend();
+    await renderPage(four);
+    const bar = screen.getByRole("toolbar", { name: "Bulk actions" });
+    await user.click(within(bar).getByRole("button", { name: "More" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Use original title for 4 titles" }),
+    );
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toEqual({ ids: ["1", "2", "3", "4"], original: true });
+    await waitFor(() =>
+      expect(useToastStore.getState().toasts[0]?.message).toBe(
+        "Now using the original title for 2 titles. 2 titles had no other title to switch to.",
+      ),
+    );
+    const toast = useToastStore.getState().toasts[0];
+    expect(toast?.undo).toBeDefined();
+    await toast?.undo?.();
+    expect(calls[1]).toEqual({ ids: ["1", "3"], original: false });
+  });
+
+  it("names the one title and switches it back to its localized title", async () => {
+    const user = userEvent.setup();
+    const calls = choiceBackend();
+    await renderPage([target("1", "La Ciudad Dormida")]);
+    await user.pointer({ target: screen.getByTestId("area"), keys: "[MouseRight]" });
+    await user.click(await screen.findByRole("menuitem", { name: "Use localized title" }));
+    await waitFor(() => expect(calls[0]).toEqual({ ids: ["1"], original: false }));
+    await waitFor(() =>
+      expect(useToastStore.getState().toasts[0]?.message).toBe(
+        "Now using the localized title for La Ciudad Dormida",
+      ),
+    );
+  });
+
+  it("says so when no selected title has another title", async () => {
+    const user = userEvent.setup();
+    choiceBackend();
+    await renderPage([target("2", "Heat")]);
+    await user.pointer({ target: screen.getByTestId("area"), keys: "[MouseRight]" });
+    await user.click(await screen.findByRole("menuitem", { name: "Use original title" }));
+    await waitFor(() =>
+      expect(useToastStore.getState().toasts[0]?.message).toBe(
+        "Nothing changed: these titles already use that title, or have no other original title.",
+      ),
+    );
+    expect(useToastStore.getState().toasts[0]?.undo).toBeUndefined();
+  });
+});
