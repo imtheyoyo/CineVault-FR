@@ -91,11 +91,11 @@ irm https://imtheyoyo.github.io/CineVault-FR/install.ps1 | iex
 curl -fsSL https://imtheyoyo.github.io/CineVault-FR/install.sh | sh
 ```
 
-**NAS et Docker :** un [modèle Unraid](packaging/unraid/cinevault.xml), un [fichier Compose](docker-compose.yml) pour Synology, TrueNAS et autres, et l'image `ghcr.io/imtheyoyo/cinevault-fr` ([mode d'emploi, en anglais](packaging/README.md#install-by-hand-with-docker)).
+**NAS et Docker :** un [modèle Unraid](packaging/unraid/cinevault.xml), un [fichier Compose](docker-compose.yml) pour Synology, TrueNAS et autres, et l'image `ghcr.io/imtheyoyo/cinevault-fr` ([mode d'emploi](packaging/README.fr.md#installation-manuelle-avec-docker)).
 
 L'installateur demande vos dossiers de films et de séries, démarre CineVault et ouvre `http://localhost:8787` ; il affiche aussi l'adresse à utiliser depuis les autres appareils. Ensuite :
 
-1. **Choisissez un mot de passe** sur la page d'accueil, depuis n'importe quel appareil de votre réseau domestique. Elle reste affichée tant qu'aucun mot de passe n'est défini. Mot de passe oublié plus tard ? **Mot de passe oublié ?** sur la page de connexion vous donne un code PIN à usage unique dans le dossier de données de CineVault ([comment faire](packaging/README.md#everyday-use)).
+1. **Choisissez un mot de passe** sur la page d'accueil, depuis n'importe quel appareil de votre réseau domestique. Elle reste affichée tant qu'aucun mot de passe n'est défini. Mot de passe oublié plus tard ? **Mot de passe oublié ?** sur la page de connexion vous donne un code PIN à usage unique dans le dossier de données de CineVault ([comment faire](packaging/README.fr.md#utilisation-au-quotidien)).
 2. **Ajoutez vos dossiers** dans la configuration. Sous Linux, ils gardent leurs chemins habituels. Avec Docker, ils apparaissent sous `/media/` : par exemple votre `D:\Movies` devient `/media/Movies` ; l'installateur affiche la liste.
 3. **Saisissez votre [clé TMDB](https://www.themoviedb.org/settings/api) gratuite** et lancez un scan.
 
@@ -104,7 +104,7 @@ L'installateur demande vos dossiers de films et de séries, démarre CineVault e
   <img src="site/img/server-login-dark.webp" width="1440" height="900" alt="La page de connexion du serveur CineVault : un champ de mot de passe, un contrôle afficher/masquer et la note de récupération">
 </picture>
 
-Gardez-le sur votre réseau domestique ou derrière un VPN ; ne redirigez jamais son port vers Internet. Pas encore dans la bêta : les ordinateurs ARM (Raspberry Pi, NAS ARM) et « Ouvrir dans Kodi ». **[Le guide complet](packaging/README.md)** (en anglais) détaille chaque étape, les commandes pour l'arrêter, le démarrer et le mettre à jour, un mot de passe oublié, les sauvegardes, l'installation à la main avec Docker ou les paquets, les [dossiers de bibliothèque sur un NAS](packaging/README.md#library-folders-on-a-nas) et le dépannage.
+Gardez-le sur votre réseau domestique ou derrière un VPN ; ne redirigez jamais son port vers Internet. Pas encore dans la bêta : les ordinateurs ARM (Raspberry Pi, NAS ARM) et « Ouvrir dans Kodi ». **[Le guide complet](packaging/README.fr.md)** détaille chaque étape, les commandes pour l'arrêter, le démarrer et le mettre à jour, un mot de passe oublié, les sauvegardes, l'installation à la main avec Docker ou les paquets, les [dossiers de bibliothèque sur un NAS](packaging/README.fr.md#dossiers-de-bibliothèque-sur-un-nas) et le dépannage.
 
 L'application de bureau et le serveur peuvent partager un dossier de données, mais un seul à la fois peut l'ouvrir. Le serveur pose un verrou `library-owner.json` ; l'application de bureau refuse ce dossier et la ligne de commande `cinevault` se termine avec le code 2 au lieu d'écrire dans le dos du serveur.
 
@@ -146,11 +146,11 @@ bun run tauri dev        # lancer l'application de bureau
 bun run tauri build      # installateurs dans target/release/bundle/
 ```
 
-Les vérifications à lancer avant une pull request sont listées dans [CONTRIBUTING.md](CONTRIBUTING.md).
+Les vérifications à lancer avant une pull request sont listées dans [CONTRIBUTING.fr.md](CONTRIBUTING.fr.md).
 
 ## Contribuer
 
-CineVault est open source et les contributions sont les bienvenues : rapports de bugs, idées, documentation et pull requests. Les questions et les idées ouvertes vont dans les [Discussions](https://github.com/imtheyoyo/CineVault-FR/discussions) ; le suivi des tickets est réservé aux bugs et aux fonctionnalités précises. Lisez d'abord [CONTRIBUTING.md](CONTRIBUTING.md) ; les contributeurs et les assistants de code IA suivent aussi [AGENTS.md](AGENTS.md). Chaque changement, y compris ceux du mainteneur, passe par une pull request depuis une branche, et la CI doit réussir avant la fusion. Merci de signaler les failles de sécurité en privé, comme décrit dans [SECURITY.md](SECURITY.md).
+CineVault est open source et les contributions sont les bienvenues : rapports de bugs, idées, documentation et pull requests. Les questions et les idées ouvertes vont dans les [Discussions](https://github.com/imtheyoyo/CineVault-FR/discussions) ; le suivi des tickets est réservé aux bugs et aux fonctionnalités précises. Lisez d'abord [CONTRIBUTING.fr.md](CONTRIBUTING.fr.md) ; les contributeurs et les assistants de code IA suivent aussi [AGENTS.md](AGENTS.md). Chaque changement, y compris ceux du mainteneur, passe par une pull request depuis une branche, et la CI doit réussir avant la fusion. Merci de signaler les failles de sécurité en privé, comme décrit dans [SECURITY.md](SECURITY.fr.md).
 
 ## Licence
 
