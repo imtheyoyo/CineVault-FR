@@ -4,6 +4,8 @@
 
 # CineVault
 
+**English** · [Français](README.fr.md)
+
 > CineVault FR is an independent fork of [CineVault](https://github.com/mustafayevt/CineVault) by mustafayevt (Apache-2.0) with a French interface and a folder step on Scrape.
 
 **A fast, free and open-source desktop library manager for your movies and TV shows, for Windows and Linux (beta).**
